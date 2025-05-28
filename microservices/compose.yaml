@@ -1,0 +1,22 @@
+services:
+  
+  api:
+    build:
+      context: api
+      dockerfile: Containerfile
+  
+  cowsay:
+    environment:
+    - HELLO_SERVER_URL=http://api:8080
+    build:
+      context: cowsay
+      dockerfile: Containerfile
+  
+  ui:
+    environment:
+    - COWSAY_SERVER_URL=http://cowsay:8080
+    build:
+      context: ui
+      dockerfile: Containerfile
+    ports:
+    - "8080:8080"
