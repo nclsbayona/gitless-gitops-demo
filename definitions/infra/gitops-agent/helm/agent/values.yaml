@@ -1,0 +1,7 @@
+environment: dev
+
+registry_url: docker.io
+
+image:
+  repository: /demo/agent
+  tag: "latest"

@@ -1,0 +1,13 @@
+registry_url: zot
+
+api_image:
+  repository: /demo/api
+  tag: "latest"
+
+cowsay_image:
+  repository: /demo/cowsay
+  tag: "latest"
+
+ui_image:
+  repository: /demo/ui
+  tag: "latest"
