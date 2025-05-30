@@ -1,5 +1,5 @@
-repository_url: zot/demo/agent
+repository_url: zot/demo/app
 
-avoid:
-- regex: '.*'
+only:
+  regex: '.*'
   message: 'Just testing the rules for the gitops-agent service'

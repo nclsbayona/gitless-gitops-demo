@@ -1,4 +1,4 @@
-FROM golang:alpine AS builder
+FROM docker.io/golang:alpine AS builder
 WORKDIR /app
 
 COPY go.mod go.sum ./
@@ -10,7 +10,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
 FROM scratch
 ENV PORT 8080
 EXPOSE $PORT
-ENV RULES_FILE=/rules.yaml
-VOLUME ["/rules.yaml"]
+ARG RULES_FILE=/etc/agent/rules.yaml
+ENV RULES_FILE ${RULES_FILE}
+VOLUME [${RULES_FILE}]
 COPY --from=builder /app/app /app
 ENTRYPOINT ["/app"]

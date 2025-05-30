@@ -12,7 +12,7 @@ if [ "$ENVIRONMENT" != "dev" ]; then
   exit 1
 fi
 
-RELEASE=${ENVIRONMENT}-zot
+RELEASE=zot
 VALUES=oci-values.yaml 
 
 helm repo add project-zot http://zotregistry.dev/helm-charts
@@ -26,6 +26,7 @@ image:
 service:
   type: ClusterIP
   port: 80
+  clusterIP: 10.96.13.125
 EOF
 
 helm upgrade --install ${RELEASE} project-zot/zot --namespace ${NAMESPACE} --create-namespace --values ${VALUES}
@@ -36,6 +37,7 @@ while ! kubectl get pods -n "${NAMESPACE}" | grep -q "1/1"; do
   sleep 5
 done
 
+echo "Testing..."
 helm test ${RELEASE} --namespace ${NAMESPACE}
 
 if [ $? -ne 0 ]; then

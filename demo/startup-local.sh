@@ -4,10 +4,10 @@
 ENVIRONMENT="dev"
 
 # Remove any kind cluster that might already exist
-kind delete clusters --all
+sudo kind delete clusters --all
 
 # Create the KIND cluster
-kind create cluster --config ../definitions/infra/kind-config.yaml
+sudo kind create cluster --config ../definitions/infra/kind-config.yaml
 
 kubectl config use-context kind-gitless-gitops
 
@@ -20,7 +20,7 @@ done
 echo "KIND cluster is ready. Proceeding with the setup..."
 
 # Install the OCI registry inside cluster
-NAMESPACE_OCI=${ENVIRONMENT}-oci
+NAMESPACE_OCI=oci
 sh ../definitions/infra/oci/install-oci.sh "$ENVIRONMENT" "$NAMESPACE_OCI"
 
 REGISTRY_SVC=$(kubectl get svc -n "${NAMESPACE_OCI}" -o jsonpath='{.items[0].metadata.name}')
@@ -28,9 +28,25 @@ REGISTRY_SVC=$(kubectl get svc -n "${NAMESPACE_OCI}" -o jsonpath='{.items[0].met
 echo "OCI registry is ready (SVC is ${REGISTRY_SVC} at ${NAMESPACE_OCI}). Forwarding to localhost:5000..."
 kubectl port-forward svc/"${REGISTRY_SVC}" -n "${NAMESPACE_OCI}" 5000:80 &
 
+# Upload the agent image to the OCI registry
 echo "Uploading agent image to the OCI registry..."
-docker build --no-cache -t localhost:5000/demo/agent:latest -f ../definitions/infra/gitops-agent/service/Containerfile ../definitions/infra/gitops-agent/service
-docker push localhost:5000/demo/agent:latest
+if command -v docker &> /dev/null ; then
+  docker build --no-cache -t demo/agent:latest -f ../definitions/infra/gitops-agent/service/Containerfile ../definitions/infra/gitops-agent/service
+  skopeo copy \
+  --src-daemon-host=unix:///var/run/docker.sock \
+  --dest-tls-verify=false \
+  --format oci \
+  docker-daemon:demo/agent:latest \
+  docker://localhost:5000/demo/agent:latest
+elif command -v podman &> /dev/null; then
+  echo "Docker not found, using Podman as an alternative."
+  podman build --no-cache -t demo/agent:latest -f ../definitions/infra/gitops-agent/service/Containerfile ../definitions/infra/gitops-agent/service
+  skopeo copy \
+  --dest-tls-verify=false \
+  --format oci \
+  containers-storage:localhost/demo/agent:latest \
+  docker://localhost:5000/demo/agent:latest
+fi
 
 # Verify image is available in the registry
 echo "Verifying agent image is available in the OCI registry..."
@@ -39,7 +55,7 @@ if ! curl -s -f -o /dev/null "http://localhost:5000/v2/demo/agent/manifests/late
   exit 1
 fi
 
-echo "Proceeding with the agent setup..."
+echo "Agent image OK. Proceeding with the agent setup..."
 
 # Install the GitOps agent
 AGENT_NAMESPACE="${ENVIRONMENT}-agent"

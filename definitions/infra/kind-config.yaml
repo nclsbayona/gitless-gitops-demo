@@ -6,3 +6,7 @@ runtimeConfig:
   "api/beta": "false"
 featureGates:
   KubeletInUserNamespace: true
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."zot.oci.svc.cluster.local"]
+      endpoint = ["http://10.96.13.125"]

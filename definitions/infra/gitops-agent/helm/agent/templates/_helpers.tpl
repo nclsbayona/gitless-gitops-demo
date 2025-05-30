@@ -38,6 +38,7 @@ helm.sh/chart: {{ include "agent.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/release: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+component: agent
 {{- end -}}
 
 {{/*

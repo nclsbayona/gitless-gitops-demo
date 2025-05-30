@@ -1,31 +1,66 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v2"
 )
 
-// This represents the structure of an individual rule in the YAML file
-type sAvoid_Rule struct {
-	Regex string           `yaml:"regex"`
-	Message string         `yaml:"message"`
+// OCIRepositoryInfo represents information about a repository
+type OCIRepositoryInfo struct {
+	LastUpdated time.Time
+	Tags        []string
 }
 
-func (r *sAvoid_Rule) Print() {
+var (
+	rules           *Rules
+	rules_file      string
+	ready           bool
+	lastRepoCheck   time.Time
+	currentRepoInfo OCIRepositoryInfo
+)
+
+// This represents the structure of an individual rule in the YAML file
+type sOnly_Rule struct {
+	Regex   string `yaml:"regex"`
+	Message string `yaml:"message"`
+	matcher *regexp.Regexp
+}
+
+func (r *sOnly_Rule) Print() {
 	log.Printf(" - Regex: %s\n", r.Regex)
 	log.Printf("   Message: %s\n", r.Message)
 }
 
+func (r *sOnly_Rule) Compile() error {
+	var err error
+	r.matcher, err = regexp.Compile(r.Regex)
+	return err
+}
+
+func (r *sOnly_Rule) Matches(tag string) bool {
+	if r.matcher == nil {
+		if err := r.Compile(); err != nil {
+			log.Printf("Error compiling regex: %v", err)
+			return false
+		}
+	}
+	return r.matcher.MatchString(tag)
+}
+
 // This represents the structure of the rules YAML file
 type Rules struct {
-	RepositoryURL string        `yaml:"repository_url"`
-	Avoid         []sAvoid_Rule `yaml:"avoid"`
+	RepositoryURL string     `yaml:"repository_url"`
+	Only          sOnly_Rule `yaml:"only"`
 }
 
 func (r *Rules) Print() {
@@ -33,27 +68,74 @@ func (r *Rules) Print() {
 	log.Println("--------------------------")
 	log.Println("--- GitOps Agent Rules ---")
 	log.Printf("Repository URL: %s\n", r.RepositoryURL)
-	log.Println("Avoided paths:")
-	for _, path := range r.Avoid {
-		path.Print()
-		log.Println(" ")
-	}
+	log.Println("Rules:")
+	r.Only.Print()
 	log.Println("--------------------------")
 	log.Println("")
 }
 
-var rules *Rules
-var rules_file string
-var ready bool
+func (r *Rules) CheckRepository() (bool, error) {
+	// Split RepositoryURL into registry and repository
+	parts := regexp.MustCompile(`^([^/]+)/(.+)$`).FindStringSubmatch(r.RepositoryURL)
+	if len(parts) != 3 {
+		return false, fmt.Errorf("invalid repository URL format: %s", r.RepositoryURL)
+	}
+	registry := parts[1]
+	repository := parts[2]
+	url := fmt.Sprintf("http://%s/v2/%s/tags/list", registry, repository)
+	resp, err := http.Get(url)
+	if err != nil {
+		return false, fmt.Errorf("error checking repository: %v", err)
+	}
+	defer resp.Body.Close()
 
-func init() {
-	rules_file = os.Getenv("RULES_FILE")
-
-	if rules_file == "" {
-		rules_file = "/rules.yaml"
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	parseRulesFile()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, fmt.Errorf("error reading response: %v", err)
+	}
+
+	var tagsResponse struct {
+		Name string   `json:"name"`
+		Tags []string `json:"tags"`
+	}
+
+	if err := json.Unmarshal(body, &tagsResponse); err != nil {
+		return false, fmt.Errorf("error parsing JSON: %v", err)
+	}
+
+	// Check if any new tag matches our rules
+	hasChanges := false
+	if lastRepoCheck.IsZero() {
+		hasChanges = true
+	} else {
+		for _, tag := range tagsResponse.Tags {
+			if r.Only.Matches(tag) {
+				// Check if this tag wasn't in our previous check
+				found := false
+				for _, oldTag := range currentRepoInfo.Tags {
+					if oldTag == tag {
+						found = true
+						break
+					}
+				}
+				if !found {
+					hasChanges = true
+					break
+				}
+			}
+		}
+	}
+
+	// Update current info
+	currentRepoInfo.Tags = tagsResponse.Tags
+	currentRepoInfo.LastUpdated = time.Now()
+	lastRepoCheck = time.Now()
+
+	return hasChanges, nil
 }
 
 func parseRulesFile() {
@@ -77,7 +159,6 @@ func parseRulesFile() {
 		log.Fatalf("Error parsing YAML: %v", err)
 	}
 
-	log.Printf("Loaded %d rules from %s\n", len(rules.Avoid), rules_file)
 	rules.Print()
 }
 
@@ -118,6 +199,30 @@ func watchRulesFile(rule_watcher_stop chan bool) {
 			} else {
 				log.Println("No changes detected in rules file")
 			}
+
+			// Check repository changes
+			if rules != nil {
+				changed, err := rules.CheckRepository()
+				if err != nil {
+					log.Printf("Error checking repository: %v", err)
+				} else if changed {
+					log.Println("Repository changes detected!")
+					// Process repository changes
+					processRepositoryChanges()
+				} else {
+					log.Println("No repository changes detected")
+				}
+			}
+		}
+	}
+}
+
+func processRepositoryChanges() {
+	log.Printf("Processing changes in repository %s", rules.RepositoryURL)
+	for _, tag := range currentRepoInfo.Tags {
+		if rules.Only.Matches(tag) {
+			log.Printf("Tag %s matches rule pattern %s", tag, rules.Only.Regex)
+			log.Printf("Rule message: %s", rules.Only.Message)
 		}
 	}
 }
@@ -130,14 +235,26 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 			log.Println("Waiting for readiness...")
 			time.Sleep(10 * time.Second)
 		}
-		
+
 		ready = false
 		log.Println("Working...")
 
 		go func() {
-			// Simulate some work
 			log.Println("Processing webhook...")
-			time.Sleep(1 * time.Minute)
+
+			// Check repository for changes
+			if rules != nil {
+				changed, err := rules.CheckRepository()
+				if err != nil {
+					log.Printf("Error checking repository: %v", err)
+				} else if changed {
+					log.Println("Repository changes detected!")
+					processRepositoryChanges()
+				} else {
+					log.Println("No repository changes detected")
+				}
+			}
+
 			ready = true
 			log.Println("Done")
 		}()
@@ -148,20 +265,17 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {
 	if ready {
-		w.Write([]byte("GitOps Agent is ready!"))
-		log.Println("OK")
 		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("GitOps Agent is ready!"))
 	} else {
-		w.Write([]byte("GitOps Agent is not ready"))
-		log.Println("Not OK")
 		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("GitOps Agent is not ready"))
 	}
 }
 
 func alive(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("GitOps Agent is alive!"))
-	log.Println("OK")
 }
 
 func startHTTPServer(port string) *http.Server {
@@ -182,6 +296,32 @@ func startHTTPServer(port string) *http.Server {
 	}()
 
 	return server
+}
+
+func init() {
+	rules_file = os.Getenv("RULES_FILE")
+
+	if rules_file == "" {
+		rules_file = "/etc/agent/rules.yaml"
+	}
+
+	parseRulesFile()
+
+	// Initialize repository monitoring
+	if rules != nil {
+		// Compile the regex pattern
+		if err := rules.Only.Compile(); err != nil {
+			log.Printf("Warning: Error compiling regex pattern: %v", err)
+		}
+
+		// Do initial repository check
+		changed, err := rules.CheckRepository()
+		if err != nil {
+			log.Printf("Warning: Error in initial repository check: %v", err)
+		} else if changed {
+			log.Println("Initial repository state recorded")
+		}
+	}
 }
 
 func main() {

@@ -22,6 +22,7 @@ while ! kubectl get pods -n "${NAMESPACE}" | grep -q "1/1"; do
   sleep 5
 done
 
+echo "Testing..."
 helm test ${NAMESPACE} --namespace ${NAMESPACE}
 
 if [ $? -ne 0 ]; then

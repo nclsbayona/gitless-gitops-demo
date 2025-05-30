@@ -1,9 +1,20 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: agent
+  {{- include "agent.metadata" . | nindent 2 }}
+data:
+  rules: |
+    repository_url: zot.oci.svc.cluster.local/demo/app
+    only:
+      regex: '.*'
+      message: 'Just testing the rules for the gitops-agent service'
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: agent
   {{- include "agent.metadata" . | nindent 2 }}
-    component: agent
 spec:
   replicas: 1
   selector:
@@ -16,6 +27,13 @@ spec:
         component: agent
         environment: {{ .Values.environment }}
     spec:
+      volumes:
+      - name: gitops-agent-config
+        configMap:
+          name: agent
+          items:
+          - key: rules
+            path: rules.yaml
       hostUsers: false
       serviceAccountName: {{ .Values.environment }}-{{ .Chart.Name }}-sa
       securityContext:
@@ -23,6 +41,10 @@ spec:
         runAsUser: 1000
       containers:
       - name: agent
+        volumeMounts:
+        - name: gitops-agent-config
+          mountPath: /etc/agent
+          readOnly: true
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
@@ -59,7 +81,6 @@ kind: Service
 metadata:
   name: agent
   {{- include "agent.metadata" . | nindent 2 }}
-    component: agent
 spec:
   type: ClusterIP
   ports:
