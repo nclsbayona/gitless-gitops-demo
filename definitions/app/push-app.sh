@@ -4,8 +4,8 @@
 
 NAMESPACE="$1"
 REGISTRY_URL="$2"
-LOCAL_REGISTRY="${3:-$REGISTRY_URL}"
-TAG="${4:-latest}"
+TAG="${3:-latest}"
+LOCAL_REGISTRY="${4:-$REGISTRY_URL}"
 API_IMAGE="${5:-demo/api:latest}"
 COWSAY_IMAGE="${6:-demo/cowsay:latest}"
 UI_IMAGE="${7:-demo/ui:latest}"
