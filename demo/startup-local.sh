@@ -7,7 +7,8 @@ ENVIRONMENT="dev"
 sudo kind delete clusters --all
 
 # Create the KIND cluster
-sudo kind create cluster --config ../definitions/infra/kind-config.yaml
+KUBECONFIG=${HOME}/.kube/config
+sudo kind create cluster --config ../definitions/infra/kind-config.yaml --kubeconfig "${KUBECONFIG}"
 
 kubectl config use-context kind-gitless-gitops
 
@@ -60,3 +61,8 @@ echo "Agent image OK. Proceeding with the agent setup..."
 # Install the GitOps agent
 AGENT_NAMESPACE="${ENVIRONMENT}-agent"
 sh ../definitions/infra/gitops-agent/install-agent.sh "${AGENT_NAMESPACE}" "${REGISTRY_SVC}.${NAMESPACE_OCI}.svc.cluster.local"
+
+# Publish the first app artifact to the OCI registry using helm template so GitOps Agent can pick it up
+echo "Publishing the first app artifact to the OCI registry..."
+
+../definitions/app/push-app.sh "${ENVIRONMENT}" "${REGISTRY_SVC}.${NAMESPACE_OCI}.svc.cluster.local" "localhost:5000" "v1.0.0"

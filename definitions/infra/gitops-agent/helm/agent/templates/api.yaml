@@ -4,11 +4,7 @@ metadata:
   name: agent
   {{- include "agent.metadata" . | nindent 2 }}
 data:
-  rules: |
-    repository_url: zot.oci.svc.cluster.local/demo/app
-    only:
-      regex: '.*'
-      message: 'Just testing the rules for the gitops-agent service'
+  rules: {{ quote .Values.rules }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -48,7 +44,7 @@ spec:
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
-        image: "{{ .Values.registry_url }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         ports:
         - name: http
           containerPort: 8080
@@ -68,13 +64,13 @@ spec:
             path: /status
             port: http
           initialDelaySeconds: 10
-          resources:
-            requests:
-              cpu: 10m
-              memory: 15Mi
-            limits:
-              cpu: 20m
-              memory: 25Mi
+      resources:
+        requests:
+          cpu: 10m
+          memory: 15Mi
+        limits:
+          cpu: 20m
+          memory: 25Mi
 ---
 apiVersion: v1
 kind: Service

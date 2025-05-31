@@ -3,8 +3,10 @@ This repository is meant to be used as reference to understand Gitless GitOps vi
 
 ## Dependencies
 
-- Kind
-- Helm
-- Podman or Docker
-- Skopeo
-- Oras
+- kind
+- helm
+- podman or docker
+- skopeo
+- oras
+- cosign
+- jq

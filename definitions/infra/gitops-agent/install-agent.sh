@@ -11,7 +11,8 @@ if [ -z "$NAMESPACE" ] || [ -z "$REGISTRY_URL" ]; then
 fi
 
 cat <<EOF > ${VALUES}
-registry_url: ${REGISTRY_URL}
+image:
+  repository: ${REGISTRY_URL}/demo/agent
 EOF
 
 helm upgrade --install ${NAMESPACE} ../definitions/infra/gitops-agent/helm/agent --namespace ${NAMESPACE} --create-namespace --values ${VALUES}

@@ -14,5 +14,5 @@ services:
   zot:
     image: 'ghcr.io/project-zot/zot-minimal-linux-amd64:latest'
     ports:
-    - '80:5000'
+    - '5000:5000'
     restart: unless-stopped

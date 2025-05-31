@@ -8,7 +8,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
 
 # Create minimal container with the scratch image
 FROM scratch
-ENV HELLO_SERVER_URL 0
+ENV HELLO_SERVER_URL=0
 EXPOSE 8080
 COPY --from=builder /app/app /app
 ENTRYPOINT ["/app"]

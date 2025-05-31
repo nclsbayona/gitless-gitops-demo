@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,12 +22,42 @@ type OCIRepositoryInfo struct {
 	Tags        []string
 }
 
+// HistoryEntry represents a single task in the history
+type HistoryEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Action    string    `json:"action"`
+	Details   string    `json:"details"`
+}
+
+// TaskHistory manages the history of tasks
+type TaskHistory struct {
+	entries []HistoryEntry
+	mutex   sync.RWMutex
+}
+
+func (h *TaskHistory) Add(action, details string) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.entries = append(h.entries, HistoryEntry{
+		Timestamp: time.Now(),
+		Action:    action,
+		Details:   details,
+	})
+}
+
+func (h *TaskHistory) GetAll() []HistoryEntry {
+	h.mutex.RLock()
+	defer h.mutex.RUnlock()
+	return h.entries
+}
+
 var (
 	rules           *Rules
 	rules_file      string
 	ready           bool
 	lastRepoCheck   time.Time
 	currentRepoInfo OCIRepositoryInfo
+	history         TaskHistory
 )
 
 // This represents the structure of an individual rule in the YAML file
@@ -135,6 +166,7 @@ func (r *Rules) CheckRepository() (bool, error) {
 	currentRepoInfo.LastUpdated = time.Now()
 	lastRepoCheck = time.Now()
 
+	history.Add("CheckRepository", fmt.Sprintf("Checked repository %s for changes. Found changes: %v", r.RepositoryURL, hasChanges))
 	return hasChanges, nil
 }
 
@@ -219,16 +251,22 @@ func watchRulesFile(rule_watcher_stop chan bool) {
 
 func processRepositoryChanges() {
 	log.Printf("Processing changes in repository %s", rules.RepositoryURL)
+	matchedTags := []string{}
 	for _, tag := range currentRepoInfo.Tags {
 		if rules.Only.Matches(tag) {
 			log.Printf("Tag %s matches rule pattern %s", tag, rules.Only.Regex)
 			log.Printf("Rule message: %s", rules.Only.Message)
+			matchedTags = append(matchedTags, tag)
 		}
+	}
+	if len(matchedTags) > 0 {
+		history.Add("ProcessChanges", fmt.Sprintf("Processed changes in repository %s. Matched tags: %v", rules.RepositoryURL, matchedTags))
 	}
 }
 
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received webhook request")
+	history.Add("WebhookReceived", "Processing webhook request")
 
 	go func() {
 		for !ready {
@@ -237,11 +275,10 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ready = false
-		log.Println("Working...")
 
 		go func() {
 			log.Println("Processing webhook...")
-
+			history.Add("WebhookProcessing", "Processing webhook request")
 			// Check repository for changes
 			if rules != nil {
 				changed, err := rules.CheckRepository()
@@ -278,11 +315,18 @@ func alive(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("GitOps Agent is alive!"))
 }
 
+func historyHandler(w http.ResponseWriter, r *http.Request) {
+	entries := history.GetAll()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entries)
+}
+
 func startHTTPServer(port string) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", alive)
 	mux.HandleFunc("/webhook", webhookHandler)
 	mux.HandleFunc("/status", statusHandler)
+	mux.HandleFunc("/history", historyHandler)
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -299,6 +343,11 @@ func startHTTPServer(port string) *http.Server {
 }
 
 func init() {
+	// Initialize the history slice
+	history = TaskHistory{
+		entries: make([]HistoryEntry, 0),
+	}
+
 	rules_file = os.Getenv("RULES_FILE")
 
 	if rules_file == "" {
@@ -306,6 +355,7 @@ func init() {
 	}
 
 	parseRulesFile()
+	history.Add("Startup", "Agent initialized with rules file: "+rules_file)
 
 	// Initialize repository monitoring
 	if rules != nil {

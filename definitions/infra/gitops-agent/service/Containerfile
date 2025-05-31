@@ -1,17 +1,22 @@
 FROM docker.io/golang:alpine AS builder
 WORKDIR /app
-
 COPY go.mod go.sum ./
 RUN go mod download
 COPY main.go .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
 
+FROM cgr.dev/chainguard/cosign:latest AS cosign
+
+FROM docker.io/bitnami/oras:latest AS oras
+
 # Create minimal container with the scratch image
 FROM scratch
-ENV PORT 8080
+ENV PORT=8080
 EXPOSE $PORT
 ARG RULES_FILE=/etc/agent/rules.yaml
-ENV RULES_FILE ${RULES_FILE}
+ENV RULES_FILE=${RULES_FILE}
 VOLUME [${RULES_FILE}]
+COPY --from=cosign /usr/bin/cosign /usr/local/bin/cosign
+COPY --from=oras /opt/bitnami/oras/bin/oras /usr/local/bin/oras
 COPY --from=builder /app/app /app
 ENTRYPOINT ["/app"]
