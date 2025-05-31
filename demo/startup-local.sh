@@ -65,4 +65,4 @@ sh ../definitions/infra/gitops-agent/install-agent.sh "${AGENT_NAMESPACE}" "${RE
 # Publish the first app artifact to the OCI registry using helm template so GitOps Agent can pick it up
 echo "Publishing the first app artifact to the OCI registry..."
 
-../definitions/app/push-app.sh "${ENVIRONMENT}" "${REGISTRY_SVC}.${NAMESPACE_OCI}.svc.cluster.local" "localhost:5000" "v1.0.0"
+../definitions/app/push-app.sh "${ENVIRONMENT}" "${REGISTRY_SVC}.${NAMESPACE_OCI}.svc.cluster.local" "v1.0.0" "localhost:5000"
