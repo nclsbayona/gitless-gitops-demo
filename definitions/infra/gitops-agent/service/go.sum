@@ -1,3 +1,5 @@
+github.com/sigstore/cosign/v2 v2.5.0 h1:1aRfPgRQHHlODI3Mvs/JkPBS9dJT9bRLCuHZgnHxFt8=
+github.com/sigstore/cosign/v2 v2.5.0/go.mod h1:2V2hmo+jjFNnDb5Q5VL6PXvLU9Vujio7T5yldrpNTRw=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/yaml.v2 v2.4.0 h1:D8xgwECY7CYvx+Y2n4sBz93Jn9JRvxdiyyo8CTfuKaY=
 gopkg.in/yaml.v2 v2.4.0/go.mod h1:RDklbk79AGWmwhnvt/jBztapEOGDOx6ZbXqjP6csGnQ=

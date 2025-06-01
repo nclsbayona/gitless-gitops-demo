@@ -5,7 +5,7 @@ This repository is meant to be used as reference to understand Gitless GitOps vi
 
 - kind
 - helm
-- podman or docker
+- podman
 - skopeo
 - oras
 - cosign

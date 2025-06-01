@@ -5,6 +5,7 @@ metadata:
   {{- include "agent.metadata" . | nindent 2 }}
 data:
   rules: {{ quote .Values.rules }}
+  cosign.pub: {{ quote .Values.public_key }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -30,6 +31,8 @@ spec:
           items:
           - key: rules
             path: rules.yaml
+          - key: cosign.pub
+            path: cosign.pub
       hostUsers: false
       serviceAccountName: {{ .Values.environment }}-{{ .Chart.Name }}-sa
       securityContext:

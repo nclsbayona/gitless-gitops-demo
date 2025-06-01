@@ -13,6 +13,16 @@ fi
 cat <<EOF > ${VALUES}
 image:
   repository: ${REGISTRY_URL}/demo/agent
+
+rules: |
+  repository_url: zot.oci.svc.cluster.local/demo/app
+  only: '^v.*$'
+
+cosign.pub: |
+  -----BEGIN PUBLIC KEY-----
+  MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQ4A0eg8hK9/Ad6nSRvBC5aMmhcuw
+  JOEQmg8tmBYXm3kQ1j8rOH/IqNCUZWRLfrAWBR191VL8JVKFQC+g4XpqBQ==
+  -----END PUBLIC KEY-----
 EOF
 
 helm upgrade --install ${NAMESPACE} ../definitions/infra/gitops-agent/helm/agent --namespace ${NAMESPACE} --create-namespace --values ${VALUES}

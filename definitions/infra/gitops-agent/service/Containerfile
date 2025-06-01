@@ -16,6 +16,9 @@ EXPOSE $PORT
 ARG RULES_FILE=/etc/agent/rules.yaml
 ENV RULES_FILE=${RULES_FILE}
 VOLUME [${RULES_FILE}]
+ARG COSIGN_PUBLIC_KEY=/etc/agent/cosign.pub
+ENV COSIGN_PUBLIC_KEY=${COSIGN_PUBLIC_KEY}
+VOLUME [${COSIGN_PUBLIC_KEY}]
 COPY --from=cosign /usr/bin/cosign /usr/local/bin/cosign
 COPY --from=oras /opt/bitnami/oras/bin/oras /usr/local/bin/oras
 COPY --from=builder /app/app /app
