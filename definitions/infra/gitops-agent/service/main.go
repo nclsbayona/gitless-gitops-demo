@@ -243,9 +243,14 @@ func processTag(tag Tag) error {
 
 	log.Printf("Processing tag: %s (digest: %s) using public key %s", tag.Name, tag.Digest, pubKeyPath)
 	ctx := context.Background()
-	pubKey, err := signature.LoadPublicKey(ctx, pubKeyPath)
+	log.Printf("Loading public key from: %s", pubKeyPath)
+	pemBytes, err := os.ReadFile(pubKeyPath)
 	if err != nil {
-		return fmt.Errorf("failed to load public key: %w", err)
+		return fmt.Errorf("failed to read public key file: %w", err)
+	}
+	pubKey, err := signature.LoadPublicKeyFromPEM(ctx, pemBytes)
+	if err != nil {
+		return fmt.Errorf("failed to decode PEM public key: %w", err)
 	}
 
 	parts := strings.SplitN(rules.RepositoryURL, "/", 2)
