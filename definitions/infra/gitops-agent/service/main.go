@@ -602,7 +602,6 @@ func verifyAndProcessTag(ctx context.Context, tag Tag, pubKey cosignsig.Verifier
 	checkOpts := &cosign.CheckOpts{
 		SigVerifier: pubKey,
 		Offline:     false,
-		Insecure:    true,
 	}
 
 	signatures, _, err := cosign.VerifyImageSignatures(ctx, ref, checkOpts)
