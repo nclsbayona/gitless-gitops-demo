@@ -241,6 +241,7 @@ func processTag(tag Tag) error {
 		return fmt.Errorf("COSIGN_PUBLIC_KEY not set")
 	}
 
+	log.Printf("Processing tag: %s (digest: %s) using public key %s", tag.Name, tag.Digest, pubKeyPath)
 	ctx := context.Background()
 	pubKey, err := signature.LoadPublicKey(ctx, pubKeyPath)
 	if err != nil {
