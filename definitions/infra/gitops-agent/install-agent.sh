@@ -18,7 +18,7 @@ rules: |
   repository_url: zot.oci.svc.cluster.local/demo/app
   only: '^v.*$'
 
-cosign.pub: |
+cosign_pub: |
   -----BEGIN PUBLIC KEY-----
   MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQ4A0eg8hK9/Ad6nSRvBC5aMmhcuw
   JOEQmg8tmBYXm3kQ1j8rOH/IqNCUZWRLfrAWBR191VL8JVKFQC+g4XpqBQ==

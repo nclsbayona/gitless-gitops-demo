@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -243,14 +244,10 @@ func processTag(tag Tag) error {
 
 	log.Printf("Processing tag: %s (digest: %s) using public key %s", tag.Name, tag.Digest, pubKeyPath)
 	ctx := context.Background()
-	log.Printf("Loading public key from: %s", pubKeyPath)
-	pemBytes, err := os.ReadFile(pubKeyPath)
+
+	pubKey, err := signature.LoadPublicKey(ctx, pubKeyPath)
 	if err != nil {
-		return fmt.Errorf("failed to read public key file: %w", err)
-	}
-	pubKey, err := signature.LoadPublicKeyFromPEM(ctx, pemBytes)
-	if err != nil {
-		return fmt.Errorf("failed to decode PEM public key: %w", err)
+		return fmt.Errorf("failed to load public key: %w", err)
 	}
 
 	parts := strings.SplitN(rules.RepositoryURL, "/", 2)
@@ -593,56 +590,86 @@ func containsTag(tags []Tag, tag Tag) bool {
 	return false
 }
 
-// verifyAndProcessTag verifies the signature of a single tag and processes it
 // verifyAndProcessTag verifies the signature of an OCI artifact tag using Cosign.
-// If the signature is invalid, the artifact is deleted from the registry.
 func verifyAndProcessTag(ctx context.Context, tag Tag, pubKey cosignsig.Verifier, registry, repository string) (bool, error) {
-	log.Printf("🔍 Verifying tag: %s (digest: %s)", tag.Name, tag.Digest)
+    log.Printf("🔍 Verifying tag: %s (digest: %s)", tag.Name, tag.Digest)
 
-	imageRef := fmt.Sprintf("%s/%s:%s", registry, repository, tag.Name)
-	ref, err := name.ParseReference(imageRef)
-	if err != nil {
-		return false, fmt.Errorf("failed to parse image reference %q: %w", imageRef, err)
-	}
+    // Configure reference options for insecure registry
+    options := []name.Option{name.Insecure}
+    imageRef := fmt.Sprintf("%s/%s:%s", registry, repository, tag.Name)
+    ref, err := name.ParseReference(imageRef, options...)
+    if err != nil {
+        return false, fmt.Errorf("failed to parse image reference %q: %w", imageRef, err)
+    }
 
-	checkOpts := &cosign.CheckOpts{
-		SigVerifier: pubKey,
-		Offline:     false,
-	}
+    // Configure options for HTTP transport
+    rt := http.DefaultTransport.(*http.Transport).Clone()
+    rt.TLSClientConfig = &tls.Config{
+        InsecureSkipVerify: true,
+    }
 
-	signatures, _, err := cosign.VerifyImageSignatures(ctx, ref, checkOpts)
-	if err != nil || len(signatures) == 0 {
-		log.Printf("❌ Signature verification failed for tag %q: %v", tag.Name, err)
-		history.AddEntry("VerificationFailed", fmt.Sprintf("Tag %s verification failed: %v", tag.Name, err))
+    // Configure verification options
+    checkOpts := &cosign.CheckOpts{
+        SigVerifier: pubKey,
+        Offline:     true,
+        IgnoreTlog:  true,
+        IgnoreSCT:   true,
+    }
 
-		if tag.Digest != "" {
-			deleteURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s", registry, repository, tag.Digest)
-			log.Printf("🧹 Deleting invalid artifact: %s", deleteURL)
+    // Verify signature
+    signatures, bundleVerified, err := cosign.VerifyImageSignatures(ctx, ref, checkOpts)
+    if err != nil {
+        if strings.Contains(err.Error(), "MANIFEST_UNKNOWN") || 
+           strings.Contains(err.Error(), "NAME_UNKNOWN") ||
+           strings.Contains(err.Error(), "not found") {
+            log.Printf("❌ No signatures found for tag %q", tag.Name)
+            history.AddEntry("VerificationFailed", fmt.Sprintf("No signatures found for tag %s", tag.Name))
+        } else {
+            log.Printf("❌ Signature verification error for tag %q: %v", tag.Name, err)
+            history.AddEntry("VerificationFailed", fmt.Sprintf("Tag %s verification error: %v", tag.Name, err))
+        }
 
-			req, reqErr := http.NewRequest(http.MethodDelete, deleteURL, nil)
-			if reqErr != nil {
-				log.Printf("⚠️ Failed to create DELETE request: %v", reqErr)
-				return false, fmt.Errorf("failed to create delete request: %w", reqErr)
-			}
+        // Delete invalid artifact if we have a digest
+        if tag.Digest != "" {
+            deleteURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s", registry, repository, tag.Digest)
+            log.Printf("🧹 Deleting invalid artifact: %s", deleteURL)
+            
+            req, reqErr := http.NewRequest(http.MethodDelete, deleteURL, nil)
+            if reqErr != nil {
+                log.Printf("⚠️ Failed to create DELETE request: %v", reqErr)
+                return false, fmt.Errorf("failed to create delete request: %w", reqErr)
+            }
 
-			resp, doErr := http.DefaultClient.Do(req)
-			if doErr != nil {
-				log.Printf("⚠️ Failed to delete artifact: %v", doErr)
-			} else {
-				defer resp.Body.Close()
-				log.Printf("🗑️ DELETE response: %s", resp.Status)
-			}
-		} else {
-			log.Printf("⚠️ Cannot delete: no digest available for tag %q", tag.Name)
-		}
+            client := &http.Client{Transport: rt}
+            resp, doErr := client.Do(req)
+            if doErr != nil {
+                log.Printf("⚠️ Failed to delete artifact: %v", doErr)
+            } else {
+                defer resp.Body.Close()
+                log.Printf("🗑️ DELETE response: %s", resp.Status)
+            }
+        } else {
+            log.Printf("⚠️ Cannot delete: no digest available for tag %q", tag.Name)
+        }
+        return false, fmt.Errorf("verification failed for tag %q: %w", tag.Name, err)
+    }
 
-		return false, fmt.Errorf("signature verification failed for tag %q", tag.Name)
-	}
+    if len(signatures) == 0 {
+        log.Printf("❌ No valid signatures found for tag %q", tag.Name)
+        history.AddEntry("VerificationFailed", fmt.Sprintf("No valid signatures for tag %s", tag.Name))
+        return false, fmt.Errorf("no valid signatures found for tag %q", tag.Name)
+    }
 
-	log.Printf("✅ Signature verified for tag %q", tag.Name)
-	history.AddEntry("VerificationSuccess", fmt.Sprintf("Tag %s verified successfully", tag.Name))
-	return true, nil
+    log.Printf("✅ Found %d signature(s) for tag %q", len(signatures), tag.Name)
+    if bundleVerified {
+        log.Printf("✅ Bundle verification succeeded for tag %q", tag.Name)
+    }
+
+    log.Printf("✅ Signature verified for tag %q", tag.Name)
+    history.AddEntry("VerificationSuccess", fmt.Sprintf("Tag %s verified successfully", tag.Name))
+    return true, nil
 }
+
 
 // processNewTags handles verification and processing of new tags
 func processNewTags(newTags []Tag) {
