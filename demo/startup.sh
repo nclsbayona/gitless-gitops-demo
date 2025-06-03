@@ -50,12 +50,7 @@ if ! curl -s -f -o /dev/null "http://localhost:5000/v2/demo/agent/manifests/late
   exit 1
 fi
 
-echo "Agent image OK. Proceeding with the agent setup..."
-
-# Install the GitOps agent
-AGENT_NAMESPACE="${ENVIRONMENT}-agent"
-sh ../definitions/infra/gitops-agent/install-agent.sh "${AGENT_NAMESPACE}" "${REGISTRY_SVC}.${NAMESPACE_OCI}.svc.cluster.local"
-
+echo "Agent image OK."
 # Publish the first app artifact to the OCI registry using helm template so GitOps Agent can pick it up
 echo "Publishing the first app artifact to the OCI registry..."
 
@@ -63,3 +58,8 @@ echo "Publishing the first app artifact to the OCI registry..."
 ../definitions/app/push-microservices.sh "cowsay" "localhost:5000"
 ../definitions/app/push-microservices.sh "ui" "localhost:5000"
 ../definitions/app/push-app.sh "${ENVIRONMENT}" "${REGISTRY_SVC}.${NAMESPACE_OCI}.svc.cluster.local" "v1.0.0" "localhost:5000"
+echo "Proceeding with the agent setup..."
+
+# Install the GitOps agent
+AGENT_NAMESPACE="${ENVIRONMENT}-agent"
+sh ../definitions/infra/gitops-agent/install-agent.sh "${AGENT_NAMESPACE}" "${REGISTRY_SVC}.${NAMESPACE_OCI}.svc.cluster.local"

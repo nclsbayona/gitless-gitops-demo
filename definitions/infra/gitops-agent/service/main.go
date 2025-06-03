@@ -11,16 +11,16 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/oci/remote"
 	"github.com/sigstore/cosign/v2/pkg/signature"
+	cosignsig "github.com/sigstore/sigstore/pkg/signature"
 	"gopkg.in/yaml.v2"
 )
 
@@ -36,48 +36,59 @@ type Tag struct {
 // OCIRepositoryInfo represents information about a repository
 type OCIRepositoryInfo struct {
 	LastUpdated   time.Time
-	Tags          []Tag // All available tags
-	AppliedTags   []Tag // Tags that have been successfully applied
-	DiscardedTags []Tag // Tags that were discarded (either already applied or don't match regex)
+	Tags          []Tag             // All available tags
+	Applied       map[string]string // Map of tagName -> digest for applied tags
+	DiscardedTags []Tag             // Tags that failed verification
 }
 
-// HistoryEntry represents a single task in the history
+// NewOCIRepositoryInfo creates a new repository info instance
+func NewOCIRepositoryInfo() OCIRepositoryInfo {
+	return OCIRepositoryInfo{
+		Tags:    make([]Tag, 0),
+		Applied: make(map[string]string),
+	}
+}
+
+// HistoryEntry represents a single operation in the agent's history
 type HistoryEntry struct {
-	Timestamp time.Time `json:"timestamp"`
-	Action    string    `json:"action"`
-	Details   string    `json:"details"`
+	Timestamp time.Time
+	Operation string
+	Details   string
 }
 
-// TaskHistory manages the history of tasks
+// TaskHistory keeps track of all operations
 type TaskHistory struct {
+	mu      sync.RWMutex
 	entries []HistoryEntry
-	mutex   sync.RWMutex
 }
 
-func (h *TaskHistory) Add(action, details string) {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
+var (
+	rules      *Rules
+	rules_file string
+	repoState  OCIRepositoryInfo
+	stopChan   chan struct{}
+	history    TaskHistory
+)
+
+// AddHistoryEntry adds a new entry to the history
+func (h *TaskHistory) AddEntry(operation, details string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.entries = append(h.entries, HistoryEntry{
 		Timestamp: time.Now(),
-		Action:    action,
+		Operation: operation,
 		Details:   details,
 	})
 }
 
-func (h *TaskHistory) GetAll() []HistoryEntry {
-	h.mutex.RLock()
-	defer h.mutex.RUnlock()
-	return h.entries
+// GetHistory returns all history entries
+func (h *TaskHistory) GetHistory() []HistoryEntry {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	result := make([]HistoryEntry, len(h.entries))
+	copy(result, h.entries)
+	return result
 }
-
-var (
-	rules           *Rules
-	rules_file      string
-	ready           bool
-	lastRepoCheck   OCIRepositoryInfo
-	currentRepoInfo OCIRepositoryInfo
-	history         TaskHistory
-)
 
 // Rules represents the structure of the rules YAML file
 type Rules struct {
@@ -122,132 +133,156 @@ func (r *Rules) Print() {
 	log.Println("")
 }
 
-func (r *Rules) CheckRepository() (bool, error) {
-	// Split RepositoryURL into registry and repository
+// checkRepository checks for new tags and processes eligible ones
+func (r *Rules) checkRepository() error {
 	parts := regexp.MustCompile(`^([^/]+)/(.+)$`).FindStringSubmatch(r.RepositoryURL)
 	if len(parts) != 3 {
-		return false, fmt.Errorf("invalid repository URL format: %s", r.RepositoryURL)
+		return fmt.Errorf("invalid repository URL format: %s", r.RepositoryURL)
 	}
-	registry := parts[1]
-	repository := parts[2]
+	registry, repository := parts[1], parts[2]
+
+	// Get list of tags
+	tags, err := fetchTags(registry, repository)
+	if err != nil {
+		return fmt.Errorf("error fetching tags: %w", err)
+	}
+
+	// Process eligible tags
+	for _, tag := range tags {
+		// Skip signature files and non-matching tags
+		if strings.HasSuffix(tag.Name, ".sig") || !r.Matches(tag.Name) {
+			continue
+		}
+
+		// Check if already processed
+		if digest, exists := repoState.Applied[tag.Name]; exists && digest == tag.Digest {
+			continue
+		}
+
+		// Process new eligible tag
+		log.Printf("Found new eligible tag: %s with digest %s", tag.Name, tag.Digest)
+		if err := processTag(tag); err != nil {
+			log.Printf("Error processing tag %s: %v", tag.Name, err)
+			continue
+		}
+	}
+
+	// Update state
+	repoState.Tags = tags
+	repoState.LastUpdated = time.Now()
+	return nil
+}
+
+// fetchTags gets all tags from the registry
+func fetchTags(registry, repository string) ([]Tag, error) {
 	url := fmt.Sprintf("http://%s/v2/%s/tags/list", registry, repository)
 	resp, err := http.Get(url)
 	if err != nil {
-		return false, fmt.Errorf("error checking repository: %v", err)
+		return nil, fmt.Errorf("error checking repository: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return false, fmt.Errorf("error reading response: %v", err)
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	var tagsResponse struct {
 		Name string   `json:"name"`
 		Tags []string `json:"tags"`
 	}
-
-	if err := json.Unmarshal(body, &tagsResponse); err != nil {
-		return false, fmt.Errorf("error parsing JSON: %v", err)
+	if err := json.NewDecoder(resp.Body).Decode(&tagsResponse); err != nil {
+		return nil, fmt.Errorf("error parsing JSON: %w", err)
 	}
 
-	// Convert string tags to Tag structs with metadata
-	newTags := make([]Tag, 0)
+	tags := make([]Tag, 0, len(tagsResponse.Tags))
 	for _, tagName := range tagsResponse.Tags {
-		// Get tag metadata by making a HEAD request
-		tagURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s", registry, repository, tagName)
-		resp, err := http.Head(tagURL)
+		tag, err := fetchTagMetadata(registry, repository, tagName)
 		if err != nil {
 			log.Printf("Warning: Error getting metadata for tag %s: %v", tagName, err)
 			continue
 		}
-		digest := resp.Header.Get("Docker-Content-Digest")
-		lastModified := resp.Header.Get("Last-Modified")
-		lastUpdated, _ := time.Parse(time.RFC1123, lastModified)
-
-		// Fetch artifact content
-		content, contentType, err := fetchArtifactContent(registry, repository, tagName, digest)
-		if err != nil {
-			log.Printf("Warning: Error fetching content for tag %s: %v", tagName, err)
-		}
-
-		newTags = append(newTags, Tag{
-			Name:        tagName,
-			LastUpdated: lastUpdated,
-			Digest:      digest,
-			Content:     content,
-			ContentType: contentType,
-		})
+		tags = append(tags, tag)
 	}
 
-	// Process and filter tags
-	eligibleTags := make([]Tag, 0)
-	discardedTags := make([]Tag, 0)
+	return tags, nil
+}
 
-	// First pass: identify eligible and discarded tags
-	for _, newTag := range newTags {
-		// Check if tag matches the regex pattern
-		if !r.Matches(newTag.Name) {
-			discardedTags = append(discardedTags, newTag)
-			continue
-		}
+// fetchTagMetadata gets metadata for a single tag
+func fetchTagMetadata(registry, repository, tagName string) (Tag, error) {
+	tagURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s", registry, repository, tagName)
+	resp, err := http.Head(tagURL)
+	if err != nil {
+		return Tag{}, err
+	}
+	defer resp.Body.Close()
 
-		// Check if tag was already applied
-		alreadyApplied := false
-		for _, appliedTag := range currentRepoInfo.AppliedTags {
-			if appliedTag.Name == newTag.Name && appliedTag.Digest == newTag.Digest {
-				alreadyApplied = true
-				discardedTags = append(discardedTags, newTag)
-				break
+	digest := resp.Header.Get("Docker-Content-Digest")
+	lastModified := resp.Header.Get("Last-Modified")
+	lastUpdated, _ := time.Parse(time.RFC1123, lastModified)
+
+	content, contentType, err := fetchArtifactContent(registry, repository, tagName, digest)
+	if err != nil {
+		log.Printf("Warning: Error fetching content for tag %s: %v", tagName, err)
+	}
+
+	return Tag{
+		Name:        tagName,
+		LastUpdated: lastUpdated,
+		Digest:      digest,
+		Content:     content,
+		ContentType: contentType,
+	}, nil
+}
+
+// processTag verifies and applies a single tag
+func processTag(tag Tag) error {
+	pubKeyPath := os.Getenv("COSIGN_PUBLIC_KEY")
+	if pubKeyPath == "" {
+		return fmt.Errorf("COSIGN_PUBLIC_KEY not set")
+	}
+
+	ctx := context.Background()
+	pubKey, err := signature.LoadPublicKey(ctx, pubKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to load public key: %w", err)
+	}
+
+	parts := strings.SplitN(rules.RepositoryURL, "/", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid repository URL")
+	}
+	registry, repository := parts[0], parts[1]
+
+	verified, err := verifyAndProcessTag(ctx, tag, pubKey, registry, repository)
+	if err != nil {
+		return fmt.Errorf("verification failed: %w", err)
+	}
+
+	if verified {
+		log.Printf("✅ Successfully verified and applied tag %s", tag.Name)
+		repoState.Applied[tag.Name] = tag.Digest
+		history.AddEntry("ApplyTag", fmt.Sprintf("Applied tag %s (digest %s)", tag.Name, tag.Digest))
+	}
+
+	return nil
+}
+
+// startRepositoryWatcher starts a goroutine to periodically check the repository
+func startRepositoryWatcher() {
+	ticker := time.NewTicker(1 * time.Minute)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				if err := rules.checkRepository(); err != nil {
+					log.Printf("Error checking repository: %v", err)
+				}
+			case <-stopChan:
+				ticker.Stop()
+				return
 			}
 		}
-
-		if !alreadyApplied {
-			eligibleTags = append(eligibleTags, newTag)
-		}
-	}
-
-	// Sort eligible tags by version (assuming semantic versioning)
-	sort.Slice(eligibleTags, func(i, j int) bool {
-		// Extract versions from tag names (assuming format v1.2.3 or similar)
-		versionI := extractVersion(eligibleTags[i].Name)
-		versionJ := extractVersion(eligibleTags[j].Name)
-		return compareVersions(versionI, versionJ) > 0 // Sort in descending order
-	})
-
-	// Select the latest eligible tag if available
-	hasChanges := false
-	if len(eligibleTags) > 0 {
-		latestTag := eligibleTags[0] // Get the highest version
-		// Check if this tag is different from our last applied tag
-		if len(currentRepoInfo.AppliedTags) == 0 ||
-			currentRepoInfo.AppliedTags[len(currentRepoInfo.AppliedTags)-1].Digest != latestTag.Digest {
-			hasChanges = true
-			// We'll add this tag to AppliedTags when we actually apply the changes
-			log.Printf("Found new eligible tag to apply: %s", latestTag.Name)
-		}
-	}
-
-	// Update current info with new state
-	currentRepoInfo.Tags = newTags
-	currentRepoInfo.LastUpdated = time.Now()
-	currentRepoInfo.DiscardedTags = discardedTags
-
-	// If we found changes and have eligible tags, update the applied tags
-	if hasChanges && len(eligibleTags) > 0 {
-		latestTag := eligibleTags[0]
-		currentRepoInfo.AppliedTags = append(currentRepoInfo.AppliedTags, latestTag)
-	}
-
-	// Save the current state for next comparison
-	lastRepoCheck = currentRepoInfo
-
-	history.Add("CheckRepository", fmt.Sprintf("Checked repository %s for changes. Found changes: %v", r.RepositoryURL, hasChanges))
-	return hasChanges, nil
+	}()
 }
 
 // ChangeSet represents changes in the repository
@@ -264,35 +299,9 @@ func getRepositoryChanges() ChangeSet {
 		UpdatedTags: make([]string, 0),
 	}
 
-	// Find new and updated tags
-	for _, newTag := range currentRepoInfo.Tags {
-		found := false
-		for _, oldTag := range lastRepoCheck.Tags {
-			if oldTag.Name == newTag.Name {
-				found = true
-				// Compare metadata to detect updates
-				if oldTag.Digest != newTag.Digest {
-					changes.UpdatedTags = append(changes.UpdatedTags, newTag.Name)
-				}
-				break
-			}
-		}
-		if !found {
-			changes.NewTags = append(changes.NewTags, newTag.Name)
-		}
-	}
-
-	// Find removed tags
-	for _, oldTag := range lastRepoCheck.Tags {
-		found := false
-		for _, newTag := range currentRepoInfo.Tags {
-			if oldTag.Name == newTag.Name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			changes.RemovedTags = append(changes.RemovedTags, oldTag.Name)
+	for _, tag := range repoState.Tags {
+		if digest, exists := repoState.Applied[tag.Name]; !exists || digest != tag.Digest {
+			changes.NewTags = append(changes.NewTags, tag.Name)
 		}
 	}
 
@@ -487,23 +496,36 @@ func watchRulesFile(rule_watcher_stop chan bool) {
 
 			// Check repository changes
 			if rules != nil {
-				changed, err := rules.CheckRepository()
-				if err != nil {
+				if err := rules.checkRepository(); err != nil {
 					log.Printf("Error checking repository: %v", err)
-				} else if changed {
-					log.Println("Repository changes detected!")
-					// Process repository changes
-					processRepositoryChanges()
 				} else {
-					log.Println("No repository changes detected")
+					log.Println("Repository checked successfully")
 				}
 			}
 		}
 	}
 }
 
+// Helper function to check if a tag was already applied
+func wasAlreadyApplied(tag Tag) bool {
+	if digest, exists := repoState.Applied[tag.Name]; exists && digest == tag.Digest {
+		return true
+	}
+	return false
+}
+
+func getChanges() ChangeSet {
+	changes := ChangeSet{
+		NewTags:     make([]string, 0),
+		RemovedTags: make([]string, 0),
+		UpdatedTags: make([]string, 0),
+	}
+	return changes
+}
+
 func processRepositoryChanges() {
 	changes := getRepositoryChanges()
+	log.Printf("Repository changes identified %d new, %d updated and %d removed", len(changes.NewTags), len(changes.UpdatedTags), len(changes.RemovedTags))
 
 	if len(changes.NewTags) > 0 {
 		log.Printf("New tags: %v", changes.NewTags)
@@ -515,88 +537,44 @@ func processRepositoryChanges() {
 		log.Printf("Removed tags: %v", changes.RemovedTags)
 	}
 
-	var eligibleTags []Tag
-	for _, tag := range currentRepoInfo.Tags {
+	var newTags []Tag
+	for _, tag := range repoState.Tags {
+		// Skip signature files
+		if strings.HasSuffix(tag.Name, ".sig") {
+			log.Printf("Skipping signature file: %s", tag.Name)
+			continue
+		}
+
+		// Check if tag matches the regex pattern
+		if !rules.Matches(tag.Name) {
+			log.Printf("Tag %s does not match pattern %s, skipping", tag.Name, rules.Only)
+			continue
+		}
+
+		// Check if already processed
 		if wasAlreadyApplied(tag) {
 			continue
 		}
-		if !rules.Matches(tag.Name) {
-			log.Printf("Skipping tag %s: doesn't match allowed pattern", tag.Name)
-			currentRepoInfo.DiscardedTags = append(currentRepoInfo.DiscardedTags, tag)
-			continue
-		}
-		eligibleTags = append(eligibleTags, tag)
+
+		newTags = append(newTags, tag)
 	}
 
-	sort.Slice(eligibleTags, func(i, j int) bool {
-		return compareVersions(extractVersion(eligibleTags[i].Name), extractVersion(eligibleTags[j].Name)) > 0
-	})
-
-	if len(eligibleTags) == 0 {
-		log.Println("No eligible tags found to apply")
+	if len(newTags) == 0 {
+		log.Printf("No new tags to process")
 		return
 	}
 
-	pubKeyPath := os.Getenv("COSIGN_PUBLIC_KEY")
-	if pubKeyPath == "" {
-		log.Println("COSIGN_PUBLIC_KEY not set, skipping verification")
-		return
+	log.Printf("Found %d new tag(s) to process", len(newTags))
+	processNewTags(newTags)
+}
+
+// Helper function to get a list of tag names
+func getCurrentTagNames(tags []Tag) []string {
+	var names []string
+	for _, tag := range tags {
+		names = append(names, tag.Name)
 	}
-
-	pubKey, err := signature.LoadPublicKey(pubKeyPath)
-	if err != nil {
-		log.Printf("Failed to load Cosign public key: %v", err)
-		return
-	}
-
-	registry, repo := strings.SplitN(rules.RepositoryURL, "/", 2)
-
-	for _, tag := range eligibleTags {
-		ref := fmt.Sprintf("%s:%s", currentRepoInfo.Repository, tag.Name)
-		log.Printf("🔍 Verifying signature for artifact: %s (digest: %s)", ref, tag.Digest)
-
-		sigs, _, err := cosign.VerifyImageSignatures(context.Background(), ref, &cosign.CheckOpts{
-			Claims:             true,
-			Tlog:               false,
-			Offline:            false,
-			SigVerifier:        pubKey,
-			RegistryClientOpts: []remote.Option{registry.WithInsecure(true)},
-		})
-
-		if err != nil {
-			log.Printf("❌ Invalid signature for tag %s: %v", tag.Name, err)
-			currentRepoInfo.DiscardedTags = append(currentRepoInfo.DiscardedTags, tag)
-
-			if registry != "" && tag.Digest != "" {
-				deleteURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s", registry, repository, tag.Name)
-				log.Printf("🧹 Attempting to delete invalid artifact via DELETE: %s", deleteURL)
-
-				resp, delErr := http.NewRequest("DELETE", deleteURL, nil)
-				if delErr != nil {
-					log.Printf("⚠️ Failed to create delete request: %v", delErr)
-					continue
-				}
-				client := &http.Client{}
-				res, doErr := client.Do(resp)
-				if doErr != nil {
-					log.Printf("⚠️ Failed to delete invalid artifact: %v", doErr)
-				} else {
-					log.Printf("🗑️ Delete response: %s", res.Status)
-					res.Body.Close()
-				}
-			}
-			continue
-		}
-
-		log.Printf("✅ Signature verified for tag %s", tag.Name)
-		log.Printf("📦 Applying artifact content:\n%s", displayArtifactContent(tag))
-
-		currentRepoInfo.AppliedTags = append(currentRepoInfo.AppliedTags, tag)
-		history.Add("ApplyTag", fmt.Sprintf("Applied tag %s (digest %s)", tag.Name, tag.Digest))
-		return
-	}
-
-	log.Println("❗ No signed and eligible tags were verified successfully.")
+	return names
 }
 
 // Helper function to check if a tag is in a slice of tags
@@ -609,83 +587,147 @@ func containsTag(tags []Tag, tag Tag) bool {
 	return false
 }
 
-func webhookHandler(w http.ResponseWriter, r *http.Request) {
-	log.Println("Received webhook request")
-	history.Add("WebhookReceived", "Processing webhook request")
+// verifyAndProcessTag verifies the signature of a single tag and processes it
+// verifyAndProcessTag verifies the signature of an OCI artifact tag using Cosign.
+// If the signature is invalid, the artifact is deleted from the registry.
+func verifyAndProcessTag(ctx context.Context, tag Tag, pubKey cosignsig.Verifier, registry, repository string) (bool, error) {
+	log.Printf("🔍 Verifying tag: %s (digest: %s)", tag.Name, tag.Digest)
 
-	go func() {
-		for !ready {
-			log.Println("Waiting for readiness...")
-			time.Sleep(10 * time.Second)
-		}
+	imageRef := fmt.Sprintf("%s/%s:%s", registry, repository, tag.Name)
+	ref, err := name.ParseReference(imageRef)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse image reference %q: %w", imageRef, err)
+	}
 
-		ready = false
+	checkOpts := &cosign.CheckOpts{
+		SigVerifier: pubKey,
+		Offline:     false,
+		Insecure:    true,
+	}
 
-		go func() {
-			log.Println("Processing webhook...")
-			history.Add("WebhookProcessing", "Processing webhook request")
-			// Check repository for changes
-			if rules != nil {
-				changed, err := rules.CheckRepository()
-				log.Printf("Repository check result: %v", changed)
-				if err != nil {
-					log.Printf("Error checking repository: %v", err)
-				} else if changed {
-					log.Println("Repository changes detected!")
-					processRepositoryChanges()
-				} else {
-					log.Println("No repository changes detected")
-				}
+	signatures, _, err := cosign.VerifyImageSignatures(ctx, ref, checkOpts)
+	if err != nil || len(signatures) == 0 {
+		log.Printf("❌ Signature verification failed for tag %q: %v", tag.Name, err)
+		history.AddEntry("VerificationFailed", fmt.Sprintf("Tag %s verification failed: %v", tag.Name, err))
+
+		if tag.Digest != "" {
+			deleteURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s", registry, repository, tag.Digest)
+			log.Printf("🧹 Deleting invalid artifact: %s", deleteURL)
+
+			req, reqErr := http.NewRequest(http.MethodDelete, deleteURL, nil)
+			if reqErr != nil {
+				log.Printf("⚠️ Failed to create DELETE request: %v", reqErr)
+				return false, fmt.Errorf("failed to create delete request: %w", reqErr)
 			}
 
-			ready = true
-			log.Println("Done")
-		}()
-	}()
+			resp, doErr := http.DefaultClient.Do(req)
+			if doErr != nil {
+				log.Printf("⚠️ Failed to delete artifact: %v", doErr)
+			} else {
+				defer resp.Body.Close()
+				log.Printf("🗑️ DELETE response: %s", resp.Status)
+			}
+		} else {
+			log.Printf("⚠️ Cannot delete: no digest available for tag %q", tag.Name)
+		}
 
-	w.WriteHeader(http.StatusOK)
+		return false, fmt.Errorf("signature verification failed for tag %q", tag.Name)
+	}
+
+	log.Printf("✅ Signature verified for tag %q", tag.Name)
+	history.AddEntry("VerificationSuccess", fmt.Sprintf("Tag %s verified successfully", tag.Name))
+	return true, nil
 }
 
+// processNewTags handles verification and processing of new tags
+func processNewTags(newTags []Tag) {
+	pubKeyPath := os.Getenv("COSIGN_PUBLIC_KEY")
+	if pubKeyPath == "" {
+		log.Println("COSIGN_PUBLIC_KEY not set, skipping verification")
+		return
+	}
+
+	ctx := context.Background()
+	pubKey, err := signature.LoadPublicKey(ctx, pubKeyPath)
+	if err != nil {
+		log.Printf("Failed to load Cosign public key: %v", err)
+		return
+	}
+
+	urlParts := strings.SplitN(rules.RepositoryURL, "/", 2)
+	if len(urlParts) != 2 {
+		log.Printf("Invalid repository URL format: %s", rules.RepositoryURL)
+		return
+	}
+	registry, repository := urlParts[0], urlParts[1]
+
+	for _, tag := range newTags {
+		verified, err := verifyAndProcessTag(ctx, tag, pubKey, registry, repository)
+		if err != nil {
+			log.Printf("❌ Verification failed for tag %s: %v", tag.Name, err)
+			repoState.DiscardedTags = append(repoState.DiscardedTags, tag)
+			continue
+		}
+
+		if verified {
+			log.Printf("✅ Successfully verified tag %s", tag.Name)
+			repoState.Applied[tag.Name] = tag.Digest
+			log.Printf("Successfully applied tag %s (digest %s)", tag.Name, tag.Digest)
+		}
+	}
+}
+
+// handleEligibleTag processes a single eligible tag immediately
+func handleEligibleTag(tag Tag) {
+	pubKeyPath := os.Getenv("COSIGN_PUBLIC_KEY")
+	if pubKeyPath == "" {
+		log.Println("COSIGN_PUBLIC_KEY not set, skipping verification")
+		return
+	}
+
+	ctx := context.Background()
+	pubKey, err := signature.LoadPublicKey(ctx, pubKeyPath)
+	if err != nil {
+		log.Printf("Failed to load Cosign public key: %v", err)
+		return
+	}
+
+	urlParts := strings.SplitN(rules.RepositoryURL, "/", 2)
+	if len(urlParts) != 2 {
+		log.Printf("Invalid repository URL format: %s", rules.RepositoryURL)
+		return
+	}
+	registry, repository := urlParts[0], urlParts[1]
+
+	verified, err := verifyAndProcessTag(ctx, tag, pubKey, registry, repository)
+	if err != nil {
+		log.Printf("❌ Verification failed for tag %s: %v", tag.Name, err)
+		repoState.DiscardedTags = append(repoState.DiscardedTags, tag)
+		return
+	}
+
+	if verified {
+		log.Printf("✅ Successfully verified tag %s", tag.Name)
+		repoState.Applied[tag.Name] = tag.Digest
+		history.AddEntry("ApplyTag", fmt.Sprintf("Applied tag %s (digest %s)", tag.Name, tag.Digest))
+	}
+}
+
+// statusHandler returns the agent's readiness status
 func statusHandler(w http.ResponseWriter, r *http.Request) {
-	if ready {
+	if rules != nil && repoState.LastUpdated.After(time.Time{}) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("GitOps Agent is ready!"))
+		w.Write([]byte("GitOps Agent is ready"))
 	} else {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("GitOps Agent is not ready"))
 	}
 }
 
+// alive is a simple liveness check endpoint
 func alive(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("GitOps Agent is alive!"))
-}
-
-func historyHandler(w http.ResponseWriter, r *http.Request) {
-	entries := history.GetAll()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(entries)
-}
-
-func startHTTPServer(port string) *http.Server {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", alive)
-	mux.HandleFunc("/webhook", webhookHandler)
-	mux.HandleFunc("/status", statusHandler)
-	mux.HandleFunc("/history", historyHandler)
-
-	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: mux,
-	}
-
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Error starting server: %v", err)
-		}
-	}()
-
-	return server
+	w.Write([]byte("GitOps Agent is alive"))
 }
 
 func init() {
@@ -695,59 +737,55 @@ func init() {
 	}
 
 	rules_file = os.Getenv("RULES_FILE")
-
 	if rules_file == "" {
 		rules_file = "/etc/agent/rules.yaml"
 	}
 
 	parseRulesFile()
-	history.Add("Startup", "Agent initialized with rules file: "+rules_file)
+	history.AddEntry("Startup", "Agent initialized with rules file: "+rules_file)
 }
 
 func main() {
+	// Initialize repository state
+	repoState = NewOCIRepositoryInfo()
+	stopChan = make(chan struct{})
 
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Create channel for rules file watcher
-	ruleWatcherStop := make(chan bool)
-
-	// Start rules file watcher in a goroutine
-	go watchRulesFile(ruleWatcherStop)
-
-	// Start HTTP server in a goroutine
-	serverChan := make(chan error)
-	go func() {
-		port := os.Getenv("PORT")
-		if port == "" {
-			port = "8080"
-		}
-		log.Printf("Starting server on port %s", port)
-		startHTTPServer(port)
-	}()
-
-	// Mark service as ready
-	ready = true
+	// Start repository watcher
+	startRepositoryWatcher()
 	log.Println("GitOps agent is ready")
 
-	// Wait for signals
-	select {
-	case err := <-serverChan:
-		log.Printf("Server error: %v", err)
-	case sig := <-sigChan:
-		log.Printf("Received signal: %v", sig)
+	// Start HTTP server with status endpoints
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", alive)               // Root endpoint for liveness
+	mux.HandleFunc("/status", statusHandler) // Status endpoint for readiness
+
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
 	}
 
-	// Cleanup
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Server error: %v", err)
+		}
+	}()
+
+	// Wait for shutdown signal
+	<-sigChan
 	log.Println("Shutting down...")
-	ruleWatcherStop <- true
-	close(ruleWatcherStop)
 
-	// Final status report
-	log.Printf("Final status - Applied tags: %d, Discarded tags: %d",
-		len(currentRepoInfo.AppliedTags),
-		len(currentRepoInfo.DiscardedTags))
+	// Clean shutdown
+	close(stopChan)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("Error during shutdown: %v", err)
+	}
 
+	log.Printf("Final status - Applied tags: %d", len(repoState.Applied))
 	log.Println("Shutdown complete")
 }
