@@ -145,16 +145,6 @@ if [ $? -ne 0 ] || [ -z "$FINAL_DIGEST" ]; then
     rm -rf bundle rendered
     exit 1
 fi
-
-echo "Verifying final signature..."
-cosign verify --key ../demo/cosign.pub "${LOCAL_REGISTRY}/demo/app@${FINAL_DIGEST}" --allow-insecure-registry
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to verify signature for final artifact"
-    rm -rf bundle rendered
-    exit 1
-fi
-echo "Signature verification successful for final artifact"
-
 # Extract registry host and path from STAGING_TAG
 REGISTRY_HOST=$(echo ${STAGING_TAG} | cut -d'/' -f1)
 IMAGE_PATH=$(echo ${STAGING_TAG} | cut -d'/' -f2-)
@@ -172,5 +162,15 @@ fi
 
 echo "Current tags after cleanup:"
 curl -s "http://${REGISTRY_HOST}/v2/demo/app/tags/list" | jq '.'
+
+echo "Verifying final signature..."
+cosign verify --key ../demo/cosign.pub "${LOCAL_REGISTRY}/demo/app@${FINAL_DIGEST}" --allow-insecure-registry
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to verify signature for final artifact"
+    rm -rf bundle rendered
+    exit 1
+fi
+echo "Signature verification successful for final artifact"
+
 # Cleanup
 rm -rf ./.bundle-layout bundle rendered

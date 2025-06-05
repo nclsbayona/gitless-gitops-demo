@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"context"
+	"crypto"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +16,13 @@ import (
 	"syscall"
 	"time"
 
+	// "github.com/sigstore/sigstore/pkg/cryptoutils"
+	// "github.com/sigstore/sigstore/pkg/signature"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/sigstore/cosign/v2/pkg/cosign"
+	"github.com/sigstore/cosign/v2/pkg/oci/remote"
+	"github.com/sigstore/sigstore/pkg/cryptoutils"
+	"github.com/sigstore/sigstore/pkg/signature"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,14 +31,15 @@ type Tag struct {
 	Name        string
 	LastUpdated time.Time
 	Digest      string
-	Sig         []byte
+	Signature   string
 	Content     []byte
 	ContentType string
 }
 
 func (t Tag) Print() {
-	log.Printf("Tag: %s, Digest: %s, Last Updated: %s, SIG %s, Content Type: %s",
-		t.Name, t.Digest, t.LastUpdated.Format(time.RFC3339), t.Sig, t.ContentType)
+	log.Printf("Tag: %s, Digest: %s, Last Updated: %s, Content Type: %s",
+		t.Name, t.Digest, t.LastUpdated.Format(time.RFC3339), t.ContentType)
+	log.Printf("Signature (hex): %x", t.Signature)
 	if len(t.Content) > 0 {
 		log.Printf("Content: %s", string(t.Content))
 	} else {
@@ -129,7 +139,6 @@ func (r *Rules) checkRepository() error {
 			continue
 		}
 
-		log.Printf("Found new eligible tag: %s with digest %s", tag.Name, tag.Digest)
 		if err := processTag(tag); err != nil {
 			log.Printf("Error processing tag %s: %v", tag.Name, err)
 			continue
@@ -163,6 +172,13 @@ func fetchTags(registry, repository string) ([]Tag, error) {
 
 	tags := make([]Tag, 0, len(tagsResponse.Tags))
 	for _, tagName := range tagsResponse.Tags {
+
+		if strings.HasSuffix(tagName, ".sig") || !rules.Matches(tagName) {
+			log.Printf("Skipping tag %s because it doesn't match rules or is a signature", tagName)
+			continue
+		}
+
+		log.Printf("Found tag: %s", tagName)
 		tag, err := fetchTagMetadata(registry, repository, tagName)
 		if err != nil {
 			log.Printf("Warning: Error getting metadata for tag %s: %v", tagName, err)
@@ -209,6 +225,7 @@ func fetchTagMetadata(registry, repository, tagName string) (Tag, error) {
 		log.Printf("Warning: Error decoding manifest response for tag %s: %v", tagName, err)
 	}
 
+	log.Printf("Tag %s has digest %s", tagName, digest)
 	lastModified := resp.Header.Get("Last-Modified")
 	lastUpdated, _ := time.Parse(time.RFC1123, lastModified)
 
@@ -221,41 +238,66 @@ func fetchTagMetadata(registry, repository, tagName string) (Tag, error) {
 		Name:        tagName,
 		LastUpdated: lastUpdated,
 		Digest:      digest,
-		Sig:         sigContent,
+		Signature:   sigContent,
 		Content:     content,
 		ContentType: contentType,
 	}, nil
 }
 
-func fetchArtifactContent(registry, repository, tag, digest string) ([]byte, []byte, string, error) {
-
+func fetchArtifactContent(registry, repository, tag, digest string) (string, []byte, string, error) {
 	digest = strings.Replace(digest, ":", "-", 1)
 	sigManifestURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s.sig", registry, repository, digest)
 	log.Printf("Fetching signature manifest from %s", sigManifestURL)
 	req, err := http.NewRequest("GET", sigManifestURL, nil)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("error creating request for signature verification: %v", err)
+		return "", nil, "", fmt.Errorf("error creating request for signature verification: %v", err)
 	}
+
+	// Add manifest media type headers for signature
+	req.Header.Add("Accept", "application/vnd.oci.image.manifest.v1+json")
+	req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+
 	sigBody, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("error fetching signature manifest: %v", err)
+		return "", nil, "", fmt.Errorf("error fetching signature manifest: %v", err)
 	}
 	defer sigBody.Body.Close()
-	log.Printf("Signature manifest response status from %s: %s", sigManifestURL, sigBody.Status)
-	if sigBody.StatusCode != http.StatusOK {
-		return nil, nil, "", fmt.Errorf("unexpected status code for signature manifest: %d", sigBody.StatusCode)
-	}
-	log.Printf("Signature manifest for tag %s fetched successfully", tag)
-	sigContent, err := io.ReadAll(sigBody.Body)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("error reading signature manifest content: %v", err)
-	}
-	log.Printf("Contents: %s. %s", sigBody.Header, string(sigContent))
 
+	if sigBody.StatusCode != http.StatusOK {
+		return "", nil, "", fmt.Errorf("unexpected status code for signature manifest: %d", sigBody.StatusCode)
+	}
+
+	// Parse the signature manifest to get annotations
+	var sigManifest struct {
+		Layers []struct {
+			Annotations map[string]string `json:"annotations"`
+		} `json:"layers"`
+	}
+
+	if err := json.NewDecoder(sigBody.Body).Decode(&sigManifest); err != nil {
+		return "", nil, "", fmt.Errorf("error parsing signature manifest: %v", err)
+	}
+
+	// Extract signature content from first layer's annotations
+	var sigContent string
+	if len(sigManifest.Layers) > 0 && len(sigManifest.Layers[0].Annotations) > 0 {
+		annotations := sigManifest.Layers[0].Annotations
+		if sig, ok := annotations["dev.cosignproject.cosign/signature"]; ok {
+			log.Printf("Cosign signature found for %s in annotations and loaded correctly!", tag)
+			sigContent = sig
+		} else {
+			log.Printf("No cosign signature found in annotations: %+v", annotations)
+			return "", nil, "", fmt.Errorf("no signature found in manifest annotations")
+		}
+	} else {
+		return "", nil, "", fmt.Errorf("no layers or annotations found in signature manifest")
+	}
+
+	// Now get the main artifact content
 	manifestURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s", registry, repository, tag)
 	req, err = http.NewRequest("GET", manifestURL, nil)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("error creating request: %v", err)
+		return "", nil, "", fmt.Errorf("error creating request: %v", err)
 	}
 
 	req.Header.Add("Accept", "application/vnd.oci.image.manifest.v1+json")
@@ -264,18 +306,18 @@ func fetchArtifactContent(registry, repository, tag, digest string) ([]byte, []b
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("error fetching manifest: %v", err)
+		return "", nil, "", fmt.Errorf("error fetching manifest: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return "", nil, "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	contentType := resp.Header.Get("Content-Type")
 	content, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("error reading content: %v", err)
+		return "", nil, "", fmt.Errorf("error reading content: %v", err)
 	}
 
 	return sigContent, content, contentType, nil
@@ -284,28 +326,120 @@ func fetchArtifactContent(registry, repository, tag, digest string) ([]byte, []b
 func verifyTag(tag Tag) error {
 	log.Printf("Verifying tag: %s (digest: %s)", tag.Name, tag.Digest)
 
-	// Here you would implement any verification logic needed for the tag.
-	// For example, checking signatures or validating content.
-	// This is a placeholder for demonstration purposes.
+	ctx := context.Background()
 
-	tag.Print()
-
-	if tag.ContentType != "application/vnd.oci.image.manifest.v1+json" {
-		return fmt.Errorf("invalid content type for tag %s: %s", tag.Name, tag.ContentType)
+	imageRef := fmt.Sprintf("%s@%s", rules.RepositoryURL, tag.Digest)
+	log.Printf("Image reference to verify: %s", imageRef)
+	// Parse the image reference
+	ref, err := name.ParseReference(imageRef, name.WithDefaultRegistry(""), name.Insecure)
+	if err != nil {
+		return fmt.Errorf("invalid image reference: %w", err)
 	}
 
-	log.Printf("Tag %s verified successfully", tag.Name)
+	pubKeyBytes, err := os.ReadFile(os.Getenv("COSIGN_PUBLIC_KEY"))
+	if err != nil {
+		return fmt.Errorf("failed to read public key file: %w", err)
+	}
+
+	// Parse the PEM-encoded public key
+	pubKey, err := cryptoutils.UnmarshalPEMToPublicKey(pubKeyBytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse public key: %w", err)
+	}
+
+	// Create a verifier using the public key
+	verifier, err := signature.LoadVerifier(pubKey, crypto.SHA256)
+	if err != nil {
+		return fmt.Errorf("failed to create verifier: %w", err)
+	}
+
+	// Build verification options
+	checkOpts := &cosign.CheckOpts{
+		SigVerifier: verifier,
+		RegistryClientOpts: []remote.Option{
+			remote.WithRemoteOptions(), // handles basic auth, plain http if needed
+		},
+		IgnoreTlog: true, // ignore transparency log
+		Offline: true, // no Rekor, no transparency log
+	}
+
+	// Perform verification
+	sigs, _, err := cosign.VerifyImageSignatures(ctx, ref, checkOpts)
+	if err != nil {
+		return fmt.Errorf("signature verification failed: %w", err)
+	}
+
+	if len(sigs) == 0 {
+		return fmt.Errorf("no signatures found for %s", imageRef)
+	}
+
+	log.Printf("✅ Verified image: %s", imageRef)
 	return nil
+// 	log.Printf("Signature %s", tag.Signature)
+// 	sigBytes, err := base64.StdEncoding.DecodeString(tag.Signature)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to decode base64 signature: %w", err)
+// 	}
+
+// 	// Read and parse the public key
+// 	keyBytes, err := os.ReadFile(os.Getenv("COSIGN_PUBLIC_KEY"))
+// 	if err != nil {
+// 		return fmt.Errorf("failed to read public key: %w", err)
+// 	}
+
+// 	pubKey, err := cryptoutils.UnmarshalPEMToPublicKey(keyBytes)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to parse public key: %w", err)
+// 	}
+
+// 	if err := cryptoutils.ValidatePubKey(pubKey); err != nil {
+// 		return fmt.Errorf("invalid public key: %w", err)
+// 	}
+
+// 	verifier, err := signature.LoadDefaultVerifier(pubKey)
+
+// 	if err != nil {
+// 		return fmt.Errorf("failed to create verifier: %w", err)
+// 	}
+
+// 	err = verifier.VerifySignature(bytes.NewReader(sigBytes), bytes.NewReader([]byte(tag.Digest)))
+// 	if err != nil {
+// 		return fmt.Errorf("signature invalid: %w", err)
+// 	}
+
+// 	log.Printf("Tag %s verified successfully", tag.Name)
+  return nil
 }
 
 func processTag(tag Tag) error {
 	ready = false
-	log.Printf("Processing tag: %s (digest: %s)", tag.Name, tag.Digest)
-	verifyTag(tag)
-	repoState.Applied[tag.Name] = tag.Digest
-	history.AddEntry("ApplyTag", fmt.Sprintf("Applied tag %s (digest %s)", tag.Name, tag.Digest))
+	err := verifyTag(tag)
+	if err != nil {
+		log.Printf("Error verifying tag %s: %v", tag.Name, err)
+		return fmt.Errorf("verification failed for tag %s: %w", tag.Name, err)
+	}
+
+	applyTag(tag)
+
 	ready = true
 	log.Printf("Tag %s processed successfully", tag.Name)
+	return nil
+}
+
+func applyTag(tag Tag) error {
+	log.Printf("Applying tag: %s (digest: %s)", tag.Name, tag.Digest)
+
+	// Here you would implement the logic to apply the tag.
+	// This could involve updating a database, sending a notification, etc.
+	// For demonstration purposes, we will just log the action.
+
+	tag.Print()
+
+	// Update the applied state
+	repoState.Applied[tag.Name] = tag.Digest
+	history.AddEntry("Apply Tag", fmt.Sprintf("Applied tag %s with digest %s", tag.Name, tag.Digest))
+
+	log.Printf("Tag %s applied successfully", tag.Name)
 	return nil
 }
 
