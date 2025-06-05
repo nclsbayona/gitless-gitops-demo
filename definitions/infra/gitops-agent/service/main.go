@@ -2,8 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"context"
+	"bytes"
 	"crypto"
+	"crypto/ecdsa"
 	"fmt"
 	"io"
 	"log"
@@ -19,8 +20,8 @@ import (
 	// "github.com/sigstore/sigstore/pkg/cryptoutils"
 	// "github.com/sigstore/sigstore/pkg/signature"
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/oci/remote"
+	// "github.com/sigstore/cosign/v2/pkg/cosign"
+	// "github.com/sigstore/cosign/v2/pkg/oci/remote"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 	"github.com/sigstore/sigstore/pkg/signature"
 	"gopkg.in/yaml.v3"
@@ -30,8 +31,8 @@ import (
 type Tag struct {
 	Name        string
 	LastUpdated time.Time
-	Digest      string
-	Signature   string
+	Digest      []byte
+	Signature   []byte
 	Content     []byte
 	ContentType string
 }
@@ -51,13 +52,13 @@ func (t Tag) Print() {
 type OCIRepositoryInfo struct {
 	LastUpdated time.Time
 	Tags        []Tag             // All available tags
-	Applied     map[string]string // Map of tagName -> digest for applied tags
+	Applied     map[string][]byte // Map of tagName -> digest for applied tags
 }
 
 func NewOCIRepositoryInfo() OCIRepositoryInfo {
 	return OCIRepositoryInfo{
 		Tags:    make([]Tag, 0),
-		Applied: make(map[string]string),
+		Applied: make(map[string][]byte),
 	}
 }
 
@@ -135,7 +136,7 @@ func (r *Rules) checkRepository() error {
 			continue
 		}
 
-		if digest, exists := repoState.Applied[tag.Name]; exists && digest == tag.Digest {
+		if _, exists := repoState.Applied[tag.Name]; exists{
 			continue
 		}
 
@@ -234,11 +235,14 @@ func fetchTagMetadata(registry, repository, tagName string) (Tag, error) {
 		log.Printf("Warning: Error fetching content for tag %s: %v", tagName, err)
 	}
 
+	var bytesDigest []byte = []byte(digest)
+	var bytesSigContent []byte = []byte(sigContent)
+
 	return Tag{
 		Name:        tagName,
 		LastUpdated: lastUpdated,
-		Digest:      digest,
-		Signature:   sigContent,
+		Digest:      bytesDigest,
+		Signature:   bytesSigContent,
 		Content:     content,
 		ContentType: contentType,
 	}, nil
@@ -326,12 +330,10 @@ func fetchArtifactContent(registry, repository, tag, digest string) (string, []b
 func verifyTag(tag Tag) error {
 	log.Printf("Verifying tag: %s (digest: %s)", tag.Name, tag.Digest)
 
-	ctx := context.Background()
-
 	imageRef := fmt.Sprintf("%s@%s", rules.RepositoryURL, tag.Digest)
 	log.Printf("Image reference to verify: %s", imageRef)
 	// Parse the image reference
-	ref, err := name.ParseReference(imageRef, name.WithDefaultRegistry(""), name.Insecure)
+	_, err := name.ParseReference(imageRef, name.WithDefaultRegistry(""), name.Insecure)
 	if err != nil {
 		return fmt.Errorf("invalid image reference: %w", err)
 	}
@@ -347,30 +349,17 @@ func verifyTag(tag Tag) error {
 		return fmt.Errorf("failed to parse public key: %w", err)
 	}
 
-	// Create a verifier using the public key
-	verifier, err := signature.LoadVerifier(pubKey, crypto.SHA256)
+	ecdsaPubKey, ok := pubKey.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("public key is not an ECDSA key")
+	}
+	verifier, err := signature.LoadECDSAVerifier(ecdsaPubKey, crypto.SHA256)
 	if err != nil {
-		return fmt.Errorf("failed to create verifier: %w", err)
+		return fmt.Errorf("creating verifier: %w", err)
 	}
 
-	// Build verification options
-	checkOpts := &cosign.CheckOpts{
-		SigVerifier: verifier,
-		RegistryClientOpts: []remote.Option{
-			remote.WithRemoteOptions(), // handles basic auth, plain http if needed
-		},
-		IgnoreTlog: true, // ignore transparency log
-		Offline: true, // no Rekor, no transparency log
-	}
-
-	// Perform verification
-	sigs, _, err := cosign.VerifyImageSignatures(ctx, ref, checkOpts)
-	if err != nil {
+	if err := verifier.VerifySignature(bytes.NewReader(tag.Signature), bytes.NewReader(tag.Digest)); err != nil {
 		return fmt.Errorf("signature verification failed: %w", err)
-	}
-
-	if len(sigs) == 0 {
-		return fmt.Errorf("no signatures found for %s", imageRef)
 	}
 
 	log.Printf("✅ Verified image: %s", imageRef)
