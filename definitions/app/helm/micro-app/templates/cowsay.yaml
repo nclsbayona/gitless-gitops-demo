@@ -30,6 +30,13 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+      resources:
+        requests:
+          cpu: 10m
+          memory: 15Mi
+        limits:
+          cpu: 20m
+          memory: 25Mi
       containers:
       - name: cowsay
         envFrom:
@@ -38,7 +45,7 @@ spec:
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
-        image: "{{ .Values.registry_url }}{{ .Values.cowsay_image.repository }}:{{ .Values.cowsay_image.tag }}"
+        image: "{{ .Values.registry_url }}/{{ .Values.cowsay_image.repository }}:{{ .Values.cowsay_image.tag }}"
         ports:
         - name: http
           containerPort: 8080
@@ -58,13 +65,6 @@ spec:
             path: /
             port: http
           initialDelaySeconds: 10
-      resources:
-        requests:
-          cpu: 10m
-          memory: 15Mi
-        limits:
-          cpu: 20m
-          memory: 25Mi
 ---
 apiVersion: v1
 kind: Service
@@ -72,13 +72,13 @@ metadata:
   name: cowsay
   {{- include "micro-app.metadata" . | nindent 2 }}
     component: cowsay
-  spec:
-    type: ClusterIP
-    ports:
-    - name: http
-      port: 80
-      targetPort: http
-    selector:
-      component: cowsay
-      environment: {{ .Values.environment }}
-
+spec:
+  selector:
+    component: cowsay
+    environment: {{ .Values.environment }}
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    

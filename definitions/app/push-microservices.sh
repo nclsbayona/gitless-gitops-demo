@@ -2,7 +2,12 @@
 # This script builds and pushes the microservices for the App to an OCI registry.
 MICROSERVICE=$1
 REGISTRY_URL=$2
-TAG="${3:-latest}"
+TAG=$(cat "../definitions/app/versions.txt" | grep "$MICROSERVICE" | awk -F '=' '{print $2}')
+
+if [ -z "$TAG" ]; then
+    echo "Error: Could not read tag from versions.txt"
+    exit 1
+fi
 
 if [ -z "$MICROSERVICE" ] || [ -z "$REGISTRY_URL" ]; then
   echo "Usage: $0 <MICROSERVICE> <REGISTRY_URL> [<TAG>]"

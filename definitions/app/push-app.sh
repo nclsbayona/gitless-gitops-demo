@@ -6,9 +6,9 @@ NAMESPACE="$1"
 REGISTRY_URL="$2"
 TAG="${3:-latest}"
 LOCAL_REGISTRY="${4:-$REGISTRY_URL}"
-API_IMAGE="${5:-demo/api:latest}"
-COWSAY_IMAGE="${6:-demo/cowsay:latest}"
-UI_IMAGE="${7:-demo/ui:latest}"
+API_IMAGE="${5:-demo/api}:$(cat ../definitions/app/versions.txt | grep api | awk -F '=' '{print $2}')"
+COWSAY_IMAGE="${6:-demo/cowsay}:$(cat ../definitions/app/versions.txt | grep cowsay | awk -F '=' '{print $2}')"
+UI_IMAGE="${7:-demo/ui}:$(cat ../definitions/app/versions.txt | grep ui | awk -F '=' '{print $2}')"
 
 # Split image names and tags
 API_IMAGE_REPO=${API_IMAGE%:*}
@@ -81,12 +81,11 @@ fi
 echo "Fetching artifact metadata for ${STAGING_TAG}..."
 echo "Manifest:"
 oras manifest fetch ${STAGING_TAG} --plain-http | jq '.'
-echo -e "\nConfig:"
-oras manifest get-config ${STAGING_TAG} --plain-http | jq '.'
 
 # Get image digest for signing
 echo -e "\nGetting image digest..."
-STAGING_DIGEST=$(oras manifest fetch ${STAGING_TAG} --plain-http | jq '.config.digest' | tr -d '"')
+# STAGING_DIGEST=$(oras manifest fetch ${STAGING_TAG} --plain-http | jq '.config.digest' | tr -d '"')
+STAGING_DIGEST=$(curl -sI "${LOCAL_REGISTRY}/v2/demo/app/manifests/pre-${TAG}" | grep -i "docker-content-digest" | awk '{print $2}' | tr -d '\r')
 if [ $? -ne 0 ] || [ -z "$STAGING_DIGEST" ]; then
     echo "Error: Failed to get image digest"
     rm -rf bundle rendered
@@ -105,7 +104,7 @@ fi
 
 # Verify staging signature using digest
 echo "Verifying staging signature..."
-cosign verify --key "../demo/cosign.pub" "${LOCAL_REGISTRY}/demo/app@${STAGING_DIGEST}" --allow-insecure-registry
+cosign verify --key "../demo/cosign.pub" "${STAGING_TAG}" --allow-insecure-registry
 if [ $? -ne 0 ]; then
     echo "Error: Staging signature verification failed"
     rm -rf bundle rendered
@@ -122,7 +121,9 @@ fi
 # Promote to final tag
 echo "Promoting artifact from ${STAGING_TAG} to ${FINAL_TAG}..."
 oras copy \
-  ${STAGING_TAG} ${FINAL_TAG}
+  ${STAGING_TAG} ${FINAL_TAG} \
+  --from-plain-http \
+   --to-plain-http 
 
 if [ $? -ne 0 ]; then
     echo "Error: Failed to promote to final tag"
@@ -134,12 +135,10 @@ fi
 echo "Fetching artifact metadata for ${FINAL_TAG}..."
 echo "Manifest:"
 oras manifest fetch ${FINAL_TAG} --plain-http | jq '.'
-echo -e "\nConfig:"
-oras manifest get-config ${FINAL_TAG} --plain-http | jq '.'
 
 # Get final digest and verify signature
 echo -e "\nGetting final digest for verification..."
-FINAL_DIGEST=$(oras manifest fetch ${FINAL_TAG} --plain-http | jq '.config.digest' | tr -d '"')
+FINAL_DIGEST=$(curl -sI "${LOCAL_REGISTRY}/v2/demo/app/manifests/${TAG}" | grep -i "docker-content-digest" | awk '{print $2}' | tr -d '\r')
 if [ $? -ne 0 ] || [ -z "$FINAL_DIGEST" ]; then
     echo "Error: Failed to get final digest"
     rm -rf bundle rendered
@@ -164,7 +163,7 @@ echo "Current tags after cleanup:"
 curl -s "http://${REGISTRY_HOST}/v2/demo/app/tags/list" | jq '.'
 
 echo "Verifying final signature..."
-cosign verify --key ../demo/cosign.pub "${LOCAL_REGISTRY}/demo/app@${FINAL_DIGEST}" --allow-insecure-registry
+cosign verify --key ../demo/cosign.pub "${FINAL_TAG}" --allow-insecure-registry
 if [ $? -ne 0 ]; then
     echo "Error: Failed to verify signature for final artifact"
     rm -rf bundle rendered

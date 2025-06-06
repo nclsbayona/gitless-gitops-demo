@@ -30,6 +30,13 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+      resources:
+        requests:
+          cpu: 10m
+          memory: 15Mi
+        limits:
+          cpu: 20m
+          memory: 25Mi
       containers:
       - name: ui
         envFrom:
@@ -38,7 +45,7 @@ spec:
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
-        image: "{{ .Values.registry_url }}{{ .Values.ui_image.repository }}:{{ .Values.ui_image.tag }}"
+        image: "{{ .Values.registry_url }}/{{ .Values.ui_image.repository }}:{{ .Values.ui_image.tag }}"
         ports:
         - name: http
           containerPort: 8080
@@ -58,13 +65,6 @@ spec:
             path: /
             port: http
           initialDelaySeconds: 10
-      resources:
-        requests:
-          cpu: 10m
-          memory: 15Mi
-        limits:
-          cpu: 20m
-          memory: 25Mi
 ---
 apiVersion: v1
 kind: Service
@@ -72,12 +72,12 @@ metadata:
   name: ui
   {{- include "micro-app.metadata" . | nindent 2 }}
     component: ui
-  spec:
-    type: ClusterIP
-    ports:
-    - name: http
-      port: 80
-      targetPort: http
-    selector:
-      component: ui
-      environment: {{ .Values.environment }}
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+  selector:
+    component: ui
+    environment: {{ .Values.environment }}

@@ -24,7 +24,31 @@ spec:
         component: agent
         environment: {{ .Values.environment }}
     spec:
+      hostUsers: false
+      serviceAccountName: {{ .Values.environment }}-{{ .Chart.Name }}-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      resources:
+        requests:
+          cpu: 10m
+          memory: 15Mi
+        limits:
+          cpu: 20m
+          memory: 25Mi
       volumes:
+      - name: kubernetes-client-config
+        projected:
+          sources:
+          - configMap:
+              items:
+              - key: ca.crt
+                path: ca.crt
+              name: kube-root-ca.crt
+          - serviceAccountToken:
+              path: token
+      - name: downloaded-files
+        emptyDir: {}
       - name: gitops-agent-config
         configMap:
           name: agent
@@ -33,14 +57,15 @@ spec:
             path: rules.yaml
           - key: cosign.pub
             path: cosign.pub
-      hostUsers: false
-      serviceAccountName: {{ .Values.environment }}-{{ .Chart.Name }}-sa
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
+      
       containers:
       - name: agent
         volumeMounts:
+        - name: kubernetes-client-config
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+        - name: downloaded-files
+          mountPath: /tmp/
         - name: gitops-agent-config
           mountPath: /etc/agent
           readOnly: true
@@ -67,13 +92,6 @@ spec:
             path: /status
             port: http
           initialDelaySeconds: 10
-      resources:
-        requests:
-          cpu: 10m
-          memory: 15Mi
-        limits:
-          cpu: 20m
-          memory: 25Mi
 ---
 apiVersion: v1
 kind: Service

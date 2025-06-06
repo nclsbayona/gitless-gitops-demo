@@ -21,13 +21,20 @@ done
 echo "KIND cluster is ready. Proceeding with the setup..."
 
 # Install the OCI registry inside cluster
-NAMESPACE_OCI=oci
-sh ../definitions/infra/oci/install-oci.sh "$ENVIRONMENT" "$NAMESPACE_OCI"
+sh ../definitions/infra/oci/install-oci.sh "$ENVIRONMENT" "oci"
 
-REGISTRY_SVC=$(kubectl get svc -n "${NAMESPACE_OCI}" -o jsonpath='{.items[0].metadata.name}')
+kubectl create ns "$ENVIRONMENT"
 
-echo "OCI registry is ready (SVC is ${REGISTRY_SVC} at ${NAMESPACE_OCI}). Forwarding to localhost:5000..."
-kubectl port-forward svc/"${REGISTRY_SVC}" -n "${NAMESPACE_OCI}" 5000:80 &
+echo "OCI registry is service is named zot and available at oci. Forwarding to localhost:80..."
+sudo kubectl --kubeconfig "${KUBECONFIG}" port-forward svc/zot -n "oci" 80:80 &
+
+# Publish the first app artifact to the OCI registry using helm template so GitOps Agent can pick it up
+echo "Publishing the first app artifact to the OCI registry..."
+
+sh ../definitions/app/push-microservices.sh "api" "zot.oci.svc.cluster.local"
+sh ../definitions/app/push-microservices.sh "cowsay" "zot.oci.svc.cluster.local"
+sh ../definitions/app/push-microservices.sh "ui" "zot.oci.svc.cluster.local"
+sh ../definitions/app/push-app.sh "${ENVIRONMENT}" "zot.oci.svc.cluster.local" "v1.0.0"
 
 # Upload the agent image to the OCI registry
 echo "Uploading agent image to the OCI registry..."
@@ -37,7 +44,7 @@ if command -v podman &> /dev/null; then
   --dest-tls-verify=false \
   --format oci \
   containers-storage:localhost/demo/agent:latest \
-  docker://localhost:5000/demo/agent:latest
+  docker://zot.oci.svc.cluster.local/demo/agent:latest
 else
   echo "Missing podman"
   exit 1
@@ -45,21 +52,15 @@ fi
 
 # Verify image is available in the registry
 echo "Verifying agent image is available in the OCI registry..."
-if ! curl -s -f -o /dev/null "http://localhost:5000/v2/demo/agent/manifests/latest"; then
+if ! curl -s -f -o /dev/null "http://zot.oci.svc.cluster.local/v2/demo/agent/manifests/latest"; then
   echo "Agent image is not available in the OCI registry."
   exit 1
 fi
 
 echo "Agent image OK."
-# Publish the first app artifact to the OCI registry using helm template so GitOps Agent can pick it up
-echo "Publishing the first app artifact to the OCI registry..."
 
-sh ../definitions/app/push-microservices.sh "api" "localhost:5000"
-sh ../definitions/app/push-microservices.sh "cowsay" "localhost:5000"
-sh ../definitions/app/push-microservices.sh "ui" "localhost:5000"
-sh ../definitions/app/push-app.sh "${ENVIRONMENT}" "${REGISTRY_SVC}.${NAMESPACE_OCI}.svc.cluster.local" "v1.0.0" "localhost:5000"
 echo "Proceeding with the agent setup..."
 
 # Install the GitOps agent
 AGENT_NAMESPACE="${ENVIRONMENT}-agent"
-sh ../definitions/infra/gitops-agent/install-agent.sh "${AGENT_NAMESPACE}" "${REGISTRY_SVC}.${NAMESPACE_OCI}.svc.cluster.local"
+sh ../definitions/infra/gitops-agent/install-agent.sh "${AGENT_NAMESPACE}" "zot.oci.svc.cluster.local"
