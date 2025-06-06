@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,15 +20,18 @@ import (
 	"syscall"
 	"time"
 
+	// Artifact signature verfication
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/sigstore/cosign/v2/pkg/oci/remote"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 	"github.com/sigstore/sigstore/pkg/signature"
 
+	// ORAS
 	oras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/file"
 	orasremote "oras.land/oras-go/v2/registry/remote"
 
+	//  Kubernetes SDK
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/discovery/cached/memory"
@@ -37,8 +42,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
-
-// Tag represents a repository tag with metadata
 type Tag struct {
 	Name        string
 	Digest      string
@@ -49,12 +52,10 @@ func (t Tag) Print() {
 	log.Printf("Tag: %s, Content Type: %s",
 		t.Name, t.ContentType)
 }
-
-// OCIRepositoryInfo represents information about a repository
 type OCIRepositoryInfo struct {
 	LastUpdated time.Time
-	Tags        []Tag             // All available tags
-	Applied     map[string][]byte // Map of tagName -> digest for applied tags
+	Tags        []Tag            
+	Applied     map[string][]byte
 }
 
 func NewOCIRepositoryInfo() OCIRepositoryInfo {
@@ -63,13 +64,10 @@ func NewOCIRepositoryInfo() OCIRepositoryInfo {
 		Applied: make(map[string][]byte),
 	}
 }
-
-// TaskHistory keeps track of all operations
 type TaskHistory struct {
 	mu      sync.RWMutex
 	entries []HistoryEntry
 }
-
 type HistoryEntry struct {
 	Timestamp time.Time
 	Operation string
@@ -113,67 +111,62 @@ func NewRules() *Rules {
 }
 
 type KubeClient struct {
-    client          *dynamic.DynamicClient
-    discoveryMapper *restmapper.DeferredDiscoveryRESTMapper
+	client          *dynamic.DynamicClient
+	discoveryMapper *restmapper.DeferredDiscoveryRESTMapper
 }
-// NewKubeClient creates an instance of KubeClient
+
 func NewKubeClient() *KubeClient {
-    config, err := rest.InClusterConfig()
-    if err != nil {
-        log.Fatal(err)
-    }
-    // create the dynamic client
-    client, err := dynamic.NewForConfig(config)
-    if err != nil {
-        log.Fatalf("failed to create dynamic client: %w", err)
-    }
-    // create a discovery client to map dynamic API resources
-    clientset, err := kubernetes.NewForConfig(config)
-    if err != nil {
-        log.Fatalf("failed to create discovery client: %w", err)
-    }
-    discoveryClient := memory.NewMemCacheClient(clientset.Discovery())
-    discoveryMapper := restmapper.NewDeferredDiscoveryRESTMapper(discoveryClient)
-    return &KubeClient{client: client, discoveryMapper: discoveryMapper}
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+	client, err := dynamic.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("failed to create dynamic client: %w", err)
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("failed to create discovery client: %w", err)
+	}
+	discoveryClient := memory.NewMemCacheClient(clientset.Discovery())
+	discoveryMapper := restmapper.NewDeferredDiscoveryRESTMapper(discoveryClient)
+	return &KubeClient{client: client, discoveryMapper: discoveryMapper}
 }
-// Apply applies the given YAML manifests to kubernetes
+
 func (k *KubeClient) Apply(r io.Reader) error {
-    dec := yaml.NewDecoder(r)
-    for {
-        // parse the YAML doc
-        obj := &unstructured.Unstructured{Object: map[string]interface{}{}}
-        err := dec.Decode(obj.Object)
-        if errors.Is(err, io.EOF) {
-            break
-        }
-        if err != nil {
-            return err
-        }
-        if obj.Object == nil {
-            log.Print("skipping empty document")
-            continue
-        }
-        // get GroupVersionResource to invoke the dynamic client
-        gvk := obj.GroupVersionKind()
-        restMapping, err := k.discoveryMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
-        if err != nil {
-            return err
-        }
-        gvr := restMapping.Resource
-        // apply the YAML doc
-        namespace := obj.GetNamespace()
-        if len(namespace) == 0 {
-            namespace = "default"
-        }
-        applyOpts := metav1.ApplyOptions{FieldManager: "kube-apply"}
-		log.Printf("Applying %s named %s in namespace %s", obj.GetKind(), obj.GetName(), obj.GetNamespace())
-        _, err = k.client.Resource(gvr).Namespace(namespace).Apply(context.TODO(), obj.GetName(), obj, applyOpts)
-        if err != nil {
-            return fmt.Errorf("apply error: %w", err)
-        }
-        log.Printf("applied YAML for %s %q", obj.GetKind(), obj.GetName())
-    }
-    return nil
+	dec := yaml.NewDecoder(r)
+	for {
+		obj := &unstructured.Unstructured{Object: map[string]interface{}{}}
+		err := dec.Decode(obj.Object)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if obj.Object == nil {
+			log.Print("skipping empty document")
+			continue
+		}
+		gvk := obj.GroupVersionKind()
+		restMapping, err := k.discoveryMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		if err != nil {
+			return err
+		}
+		gvr := restMapping.Resource
+		namespace := obj.GetNamespace()
+		if len(namespace) == 0 {
+			namespace = "default"
+		}
+		applyOpts := metav1.ApplyOptions{FieldManager: "kube-apply"}
+		log.Printf("⌛ Applying %s resource named '%s' in namespace '%s'", obj.GetKind(), obj.GetName(), obj.GetNamespace())
+		_, err = k.client.Resource(gvr).Namespace(namespace).Apply(context.TODO(), obj.GetName(), obj, applyOpts)
+		if err != nil {
+			return fmt.Errorf("apply error: %w", err)
+		}
+		log.Printf("⚓ Applied YAML for %s %q", obj.GetKind(), obj.GetName())
+	}
+	return nil
 }
 
 var (
@@ -190,7 +183,7 @@ var (
 func (r *Rules) checkRepository() error {
 	for !ready {
 		log.Printf("Waiting for readiness...")
-		time.Sleep(10*time.Second)
+		time.Sleep(10 * time.Second)
 	}
 	parts := regexp.MustCompile(`^([^/]+)/(.+)$`).FindStringSubmatch(r.RepositoryURL)
 	if len(parts) != 3 {
@@ -203,8 +196,11 @@ func (r *Rules) checkRepository() error {
 		return fmt.Errorf("error fetching tags: %w", err)
 	}
 
+	if tags == nil {
+		return nil
+	}
+
 	for _, tag := range tags {
-		
 
 		tag_index := -1
 		for i, t := range repoState.Tags {
@@ -236,6 +232,12 @@ func fetchTags(registry, repository string) ([]Tag, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 404 {
+		log.Printf("🗙 Repository is not available, sleeping ...")
+		time.Sleep(1*time.Minute)
+		return nil, nil
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
@@ -252,11 +254,11 @@ func fetchTags(registry, repository string) ([]Tag, error) {
 	for _, tagName := range tagsResponse.Tags {
 
 		if strings.HasSuffix(tagName, ".sig") || !rules.Matches(tagName) || repoState.Applied[tagName] != nil {
-			log.Printf("Skipping tag %s because it doesn't match rules, is a signature, or has already been applied", tagName)
+			log.Printf("⚫ Skipping tag '%s' because it doesn't match rules, is a signature, or has already been applied", tagName)
 			continue
 		}
 
-		log.Printf("Found tag: %s", tagName)
+		log.Printf("⭐ Found tag: '%s'", tagName)
 		tag, err := fetchTagMetadata(registry, repository, tagName)
 		if err != nil {
 			log.Printf("Warning: Error getting metadata for tag %s: %v", tagName, err)
@@ -269,7 +271,6 @@ func fetchTags(registry, repository string) ([]Tag, error) {
 }
 
 func fetchTagMetadata(registry, repository, tagName string) (Tag, error) {
-	// Now get the main artifact content
 	manifestURL := fmt.Sprintf("http://%s/v2/%s/manifests/%s", registry, repository, tagName)
 	req, err := http.NewRequest("GET", manifestURL, nil)
 	if err != nil {
@@ -299,67 +300,105 @@ func fetchTagMetadata(registry, repository, tagName string) (Tag, error) {
 }
 
 func verifyTag(tag Tag) error {
-	log.Printf("Verifying tag: %s", tag.Name)
-	imageRef := fmt.Sprintf("%s:%s", rules.RepositoryURL, tag.Name)
-	log.Printf("Image reference to verify: %s", imageRef)
-	// Parse the image reference
+	log.Printf("🔍 Verifying tag: %s", tag.Name)
+
+	imageRef := fmt.Sprintf("%s@%s", rules.RepositoryURL, tag.Digest)
 	ref, err := name.ParseReference(imageRef, name.Insecure)
 	if err != nil {
 		return fmt.Errorf("invalid image reference: %w", err)
 	}
 
-	pubKeyBytes, err := os.ReadFile(os.Getenv("COSIGN_PUBLIC_KEY"))
+	base64Data, err := os.ReadFile(os.Getenv("COSIGN_PUBLIC_KEY"))
 	if err != nil {
-		return fmt.Errorf("failed to read public key file: %w", err)
+		return fmt.Errorf("failed to read COSIGN_PUBLIC_KEY: %w", err)
 	}
 
-	// Parse the PEM-encoded public key
+	pubKeyBytes := make([]byte, base64.StdEncoding.DecodedLen(len(base64Data)))
+	n, err := base64.StdEncoding.Decode(pubKeyBytes, base64Data)
+	if err != nil {
+		return fmt.Errorf("failed to decode base64 public key: %w", err)
+	}
+	pubKeyBytes = pubKeyBytes[:n]
+
 	pubKey, err := cryptoutils.UnmarshalPEMToPublicKey(pubKeyBytes)
 	if err != nil {
 		return fmt.Errorf("failed to parse public key: %w", err)
 	}
 
-	ecdsaPubKey, ok := pubKey.(*ecdsa.PublicKey)
+	ecdsaKey, ok := pubKey.(*ecdsa.PublicKey)
 	if !ok {
-		return fmt.Errorf("public key is not an ECDSA key")
+		return fmt.Errorf("invalid key type, expected ECDSA")
 	}
-	_, err = signature.LoadECDSAVerifier(ecdsaPubKey, crypto.SHA256)
+
+	verifier, err := signature.LoadECDSAVerifier(ecdsaKey, crypto.SHA256)
 	if err != nil {
-		return fmt.Errorf("creating verifier: %w", err)
+		return fmt.Errorf("failed to create verifier: %w", err)
 	}
 
 	entity, err := remote.SignedEntity(ref, remote.WithRemoteOptions())
 	if err != nil {
-		return fmt.Errorf("failed to get signed entity for reference: %w", err)
-	}
-	signaturesE, err := entity.Signatures()
-	if err != nil {
-		return fmt.Errorf("failed to get signatures for entity: %w", err)
-	}
-	signatures, err := signaturesE.Get()
-	for _, sig := range signatures {
-		payload, err := sig.Payload()
-		if err != nil {
-			return fmt.Errorf("failed to get payload for signature: %w", err)
-		}
-		// Payload extract the field digest from JSON payload .critical.image.docker-manifest-digest
-		var payloadMap map[string]interface{}
-		if err := json.Unmarshal(payload, &payloadMap); err != nil {
-			return fmt.Errorf("failed to unmarshal payload: %w", err)
-		}
-		digest, ok := payloadMap["critical"].(map[string]interface{})["image"].(map[string]interface{})["docker-manifest-digest"].(string)
-		if !ok {
-			return fmt.Errorf("digest not found in payload")
-		}
-		log.Printf("Digest found in payload: %s", digest)
-		if digest != tag.Digest {
-			return fmt.Errorf("digest mismatch: expected %s, got %s", tag.Digest, digest)
-		}
-		log.Printf("Digest matches for tag: %s", tag.Name)
+		return fmt.Errorf("failed to fetch remote signed entity: %w", err)
 	}
 
-	log.Printf("✅ Verified image: %s", imageRef)
-	return nil
+	sigs, err := entity.Signatures()
+	if err != nil {
+		return fmt.Errorf("failed to extract signatures: %w", err)
+	}
+
+	sigList, err := sigs.Get()
+	if err != nil {
+		return fmt.Errorf("failed to list signatures: %w", err)
+	}
+
+	if len(sigList) == 0 {
+		return fmt.Errorf("no signatures found for image: %s", imageRef)
+	}
+
+	for _, sig := range sigList {
+		sigContent, err := sig.Base64Signature()
+		if err != nil {
+			return fmt.Errorf("failed to get base64 signature: %w", err)
+		}
+		payload, err := sig.Payload()
+		if err != nil {
+			return fmt.Errorf("failed to get payload: %w", err)
+		}
+
+		sigBytes, err := base64.StdEncoding.DecodeString(sigContent)
+		if err != nil {
+			return fmt.Errorf("failed to decode signature: %w", err)
+		}
+
+		var payloadMap struct {
+			Critical struct {
+				Image struct {
+					Digest string `json:"docker-manifest-digest"`
+				} `json:"image"`
+			} `json:"critical"`
+		}
+		if err := json.Unmarshal(payload, &payloadMap); err != nil {
+			return fmt.Errorf("failed to parse payload: %w", err)
+		}
+
+		signedDigest := payloadMap.Critical.Image.Digest
+		fmt.Printf("--> Reference: %s\n", ref.Name())
+		fmt.Printf("🔎 Signature base64: %s\n", sigContent)
+		log.Printf("📦 Payload inside the digest: %s", signedDigest)
+		log.Printf("🔒 Expected digest: %s", tag.Digest)
+
+		if err := verifier.VerifySignature(bytes.NewReader(sigBytes), bytes.NewReader(payload)); err != nil {
+			return fmt.Errorf("signature is invalid: %w", err)
+		}
+
+		if signedDigest != tag.Digest {
+			return fmt.Errorf("digest mismatch: expected %s, signed %s", tag.Digest, signedDigest)
+		}
+
+		log.Printf("✅ Valid signature and digest match for tag '%s'", tag.Name)
+		return nil
+	}
+
+	return fmt.Errorf("no valid signatures found for tag %s", tag.Name)
 }
 
 func processTag(tag Tag) error {
@@ -377,29 +416,23 @@ func processTag(tag Tag) error {
 	}
 
 	ready = true
-	log.Printf("Tag %s processed successfully", tag.Name)
+	log.Printf("✅ Tag '%s' processed successfully", tag.Name)
 	return nil
 }
 
 func applyTag(tag Tag) error {
-	log.Printf("Applying tag: %s", tag.Name)
-
-	// 0. Create a file store
+	log.Printf("⌛ Applying tag: '%s'", tag.Name)
 	fs, err := file.New(filePath)
 	if err != nil {
 		return fmt.Errorf("error creating file store: %w", err)
 	}
 	defer fs.Close()
-
-	// 1. Connect to the remote repository
 	ctx := context.Background()
 	repo, err := orasremote.NewRepository(rules.RepositoryURL)
 	repo.PlainHTTP = true // Use plain HTTP for local testing
 	if err != nil {
 		return fmt.Errorf("error creating repository: %w", err)
 	}
-
-	// 2. Copy from the remote repository to the file store
 	_, err = oras.Copy(ctx, repo, tag.Name, fs, tag.Name, oras.DefaultCopyOptions)
 	if err != nil {
 		return fmt.Errorf("error copying tag %s from repository: %w", tag.Name, err)
@@ -412,7 +445,7 @@ func applyTag(tag Tag) error {
 	repoState.Applied[tag.Name] = []byte(tag.Digest)
 	history.AddEntry("Apply Tag", fmt.Sprintf("Applied tag %s", tag.Name))
 
-	log.Printf("Tag %s applied successfully", tag.Name)
+	log.Printf("✅ Tag '%s' applied successfully", tag.Name)
 	return nil
 }
 
@@ -428,13 +461,12 @@ func checkAndApplyFiles(dir string) error {
 			return checkAndApplyFiles(subDir)
 		} else {
 			filePath := dir + "/" + file.Name()
-			
+
 			f, err := os.Open(filePath)
 			if err != nil {
 				return fmt.Errorf("error opening file %s: %w", filePath, err)
 			}
 			defer f.Close()
-			log.Printf("Applying file: %s", filePath)
 			if err := kubeClient.Apply(f); err != nil {
 				return fmt.Errorf("error applying file %s: %w", filePath, err)
 			}
@@ -513,7 +545,7 @@ func init() {
 		if kubeClient == nil {
 			log.Fatal("Failed to create Kubernetes client")
 		}
-		log.Println("Kubernetes client initialized")
+		log.Println("🚀 Kubernetes client initialized")
 	}()
 }
 

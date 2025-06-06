@@ -8,6 +8,4 @@ rules: |
   repository_url: zot.oci.svc.cluster.local/demo/app
   only: '.*'
 
-cosign_pub: |
-  -----BEGIN PUBLIC KEY-----
-  -----END PUBLIC KEY-----
+cosign_pub: hbha

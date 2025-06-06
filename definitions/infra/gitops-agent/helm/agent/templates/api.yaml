@@ -5,7 +5,7 @@ metadata:
   {{- include "agent.metadata" . | nindent 2 }}
 data:
   rules: {{ quote .Values.rules }}
-  cosign.pub: {{ quote .Values.cosign_pub }}
+  cosign_pub: {{ .Values.cosign_pub }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -55,7 +55,7 @@ spec:
           items:
           - key: rules
             path: rules.yaml
-          - key: cosign.pub
+          - key: cosign_pub
             path: cosign.pub
       
       containers:
