@@ -3,6 +3,8 @@
 # This script is used to start the demo environment. It will start the required infrastructure as well as the agent so that the demo can be easily run.
 ENVIRONMENT="dev"
 
+#Restore UI version to 1.0.0
+sed -i 's/^ui=1\.0\.1/ui=1.0.0/' ../definitions/app/versions.txt
 # Remove any kind cluster that might already exist
 sudo kind delete clusters --all
 
