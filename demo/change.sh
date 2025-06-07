@@ -3,8 +3,8 @@
 kubectl port-forward -n dev svc/ui 8080:80 &
 
 echo "Before changes"
-kubectl get deployments -n dev -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[*].image'
-echo "Open browser at htttp://localhost:8080 and test"
+kubectl get deployments -n dev -o custom-columns='NAME:.metadata.name,IMAGE:.spec.template.spec.containers[*].image'
+echo "Open browser at http://localhost:8080/home and test"
 read -p "Press Enter to continue..."
 
 cat << 'EOF'
@@ -101,6 +101,7 @@ sh ../definitions/app/push-app.sh "dev" "zot.oci.svc.cluster.local" "v1.0.1"
 echo "Sleeping one minute for change to be fetched"
 sleep 1m
 echo "After changes"
-kubectl get deployments -n dev -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[*].image'
-echo "Open browser at htttp://localhost:8080 and test"
+kubectl port-forward -n dev svc/ui 8081:80 &
+kubectl get deployments -n dev -o custom-columns='NAME:.metadata.name,IMAGE:.spec.template.spec.containers[*].image'
+echo "Open browser at http://localhost:8081/home and test"
 read -p "Press Enter to continue..."

@@ -44,6 +44,7 @@ func init() {
 	cow, err = cowsay.New(
 		cowsay.BallonWidth(40),
 		cowsay.Random(),
+		cowsay.Eyes("--"),
 	)
 
 	if err != nil {

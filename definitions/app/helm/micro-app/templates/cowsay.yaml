@@ -30,18 +30,18 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
-      resources:
-        requests:
-          cpu: 10m
-          memory: 15Mi
-        limits:
-          cpu: 20m
-          memory: 25Mi
       containers:
       - name: cowsay
         envFrom:
         - configMapRef:
             name: cowsay
+        resources:
+          requests:
+            cpu: 10m
+            memory: 15Mi
+          limits:
+            cpu: 20m
+            memory: 25Mi
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
