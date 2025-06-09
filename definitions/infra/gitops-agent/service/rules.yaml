@@ -1,0 +1,3 @@
+repository_url: zot/demo/app
+
+only: '^v.*$'

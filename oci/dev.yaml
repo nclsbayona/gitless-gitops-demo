@@ -1,5 +1,0 @@
-image:
-  repository: ghcr.io/project-zot/zot-minimal-linux-amd64
-
-service:
-  type: ClusterIP

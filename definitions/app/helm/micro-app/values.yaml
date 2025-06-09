@@ -1,0 +1,17 @@
+# This file is used to define the values for the Helm chart of the micro-app. This values can be overridden
+
+environment: dev
+
+registry_url: docker.io
+
+api_image:
+  repository: demo/api
+  tag: "latest"
+
+cowsay_image:
+  repository: demo/cowsay
+  tag: "latest"
+
+ui_image:
+  repository: demo/ui
+  tag: "latest"

@@ -1,0 +1,14 @@
+FROM docker.io/golang:alpine AS builder
+WORKDIR /app
+
+COPY go.mod ./
+RUN go mod download
+COPY main.go .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
+
+# Create minimal container with the scratch image
+FROM scratch
+ENV COWSAY_SERVER_URL=0
+EXPOSE 8080
+COPY --from=builder /app/app /app
+ENTRYPOINT ["/app"]

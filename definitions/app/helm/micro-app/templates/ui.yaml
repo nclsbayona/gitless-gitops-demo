@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ui
+  {{- include "micro-app.metadata" . | nindent 2 }}
+    component: ui
+data:
+  COWSAY_SERVER_URL: "http://cowsay"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  {{- include "micro-app.metadata" . | nindent 2 }}
+    component: ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: ui
+      environment: {{ .Values.environment }}
+  template:
+    metadata:
+      labels:
+        component: ui
+        environment: {{ .Values.environment }}
+    spec:
+      hostUsers: false
+      serviceAccountName: {{ .Values.environment }}-{{ .Chart.Name }}-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: ui
+        envFrom:
+        - configMapRef:
+            name: ui
+        resources:
+          requests:
+            cpu: 10m
+            memory: 15Mi
+          limits:
+            cpu: 20m
+            memory: 25Mi
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+        image: "{{ .Values.registry_url }}/{{ .Values.ui_image.repository }}:{{ .Values.ui_image.tag }}"
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        startupProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  {{- include "micro-app.metadata" . | nindent 2 }}
+    component: ui
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+  selector:
+    component: ui
+    environment: {{ .Values.environment }}

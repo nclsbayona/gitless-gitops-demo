@@ -1,0 +1,20 @@
+FROM docker.io/golang:alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY main.go .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
+
+# Create minimal container with the scratch image
+FROM scratch
+ENV PORT=8080
+EXPOSE $PORT
+ARG RULES_FILE=/etc/agent/rules.yaml
+ENV FILE_STORE_PATH=/tmp
+ENV RULES_FILE=${RULES_FILE}
+VOLUME [${RULES_FILE}]
+ARG COSIGN_PUBLIC_KEY=/etc/agent/cosign.pub
+ENV COSIGN_PUBLIC_KEY=${COSIGN_PUBLIC_KEY}
+VOLUME [${COSIGN_PUBLIC_KEY}]
+COPY --from=builder /app/app /app
+ENTRYPOINT ["/app"]

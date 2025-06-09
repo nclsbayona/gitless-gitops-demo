@@ -1,0 +1,11 @@
+environment: dev
+
+image:
+  repository: docker.io/demo/agent
+  tag: "latest"
+
+rules: |
+  repository_url: zot.oci.svc.cluster.local/demo/app
+  only: '.*'
+
+cosign_pub: hbha

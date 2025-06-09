@@ -1,0 +1,19 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Containerfile
+    environment:
+    - PORT=8080
+    volumes:
+    - ./rules.yaml:/etc/agent/rules.yaml 
+    - ./cosign.pub:/etc/agent/cosign.pub
+    ports:
+    - "8080:8080"
+    restart: unless-stopped
+
+  zot:
+    image: 'ghcr.io/project-zot/zot-minimal-linux-amd64:latest'
+    ports:
+    - '5000:5000'
+    restart: unless-stopped
