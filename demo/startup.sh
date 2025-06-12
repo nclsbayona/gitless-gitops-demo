@@ -3,8 +3,8 @@
 # This script is used to start the demo environment. It will start the required infrastructure as well as the agent so that the demo can be easily run.
 ENVIRONMENT="dev"
 
-#Restore UI version to 1.0.0
-sed -i 's/^ui=1\.0\.1/ui=1.0.0/' ../definitions/app/versions.txt
+#Restore cowsay version to 1.0.0
+sed -i 's/^cowsay=1\.0\.1/cowsay=1.0.0/' ../definitions/app/versions.txt
 # Remove any kind cluster that might already exist
 sudo kind delete clusters --all
 
@@ -23,9 +23,9 @@ done
 echo "KIND cluster is ready. Proceeding with the setup..."
 
 # Install the OCI registry inside cluster
-sh ../definitions/infra/oci/install-oci.sh "$ENVIRONMENT" "oci"
+sh ../definitions/infra/oci/install-oci.sh "dev" "oci"
 
-kubectl create ns "$ENVIRONMENT"
+kubectl create ns "dev"
 
 echo "OCI registry is service is named zot and available at oci. Forwarding to localhost:80..."
 sudo kubectl --kubeconfig "${KUBECONFIG}" port-forward svc/zot -n oci 80:80 &
@@ -54,8 +54,8 @@ fi
 echo "Agent image OK. Installing Agent in cluster"
 
 # Install the GitOps agent
-AGENT_NAMESPACE="${ENVIRONMENT}-agent"
-sh ../definitions/infra/gitops-agent/install-agent.sh "${AGENT_NAMESPACE}" "zot.oci.svc.cluster.local"
+AGENT_NAMESPACE="dev-agent"
+sh ../definitions/infra/gitops-agent/install-agent.sh "dev-agent" "zot.oci.svc.cluster.local"
 
 # Publish the first app artifact to the OCI registry using helm template so GitOps Agent can pick it up
 echo "Publishing the first app artifact to the OCI registry..."
@@ -63,4 +63,4 @@ echo "Publishing the first app artifact to the OCI registry..."
 sh ../definitions/app/push-microservices.sh "api" "zot.oci.svc.cluster.local"
 sh ../definitions/app/push-microservices.sh "cowsay" "zot.oci.svc.cluster.local"
 sh ../definitions/app/push-microservices.sh "ui" "zot.oci.svc.cluster.local"
-sh ../definitions/app/push-app.sh "${ENVIRONMENT}" "zot.oci.svc.cluster.local" "v1.0.0"
+sh ../definitions/app/push-app.sh "dev" "zot.oci.svc.cluster.local" "v1.0.0"

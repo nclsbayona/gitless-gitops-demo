@@ -51,7 +51,8 @@ if [ ! -f "../demo/cosign.key" ]; then
     fi
 fi
 
-GIT_COMMIT=$(git rev-parse HEAD)
+GIT_COMMIT_HASH=$(git rev-parse HEAD)
+GIT_COMMIT_MSG=$(git log -1 --pretty=format:'%s')
 GIT_AUTHOR=$(git log -1 --pretty=format:'%an <%ae>')
 GIT_TIMESTAMP=$(git log -1 --pretty=format:'%cI')
 GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -64,7 +65,8 @@ echo "Pushing bundle to staging tag ${STAGING_TAG}..."
 oras push ${STAGING_TAG} \
   $(find bundle -type f -exec printf '{}:application/yaml ' \;) \
   --annotation "org.opencontainers.image.created=$(date --iso-8601=seconds)" \
-  --annotation "git.commit=${GIT_COMMIT}" \
+  --annotation "git.commit.hash=${GIT_COMMIT_HASH}" \
+  --annotation "git.commit.message=${GIT_COMMIT_MSG}" \
   --annotation "git.author=${GIT_AUTHOR}" \
   --annotation "git.timestamp=${GIT_TIMESTAMP}" \
   --annotation "git.branch=${GIT_BRANCH}" \
