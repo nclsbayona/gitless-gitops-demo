@@ -12,3 +12,4 @@ This repository is meant to be used as reference to understand Gitless GitOps vi
 - curl
 - awk
 - grep
+- kubectl
